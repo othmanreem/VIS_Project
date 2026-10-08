@@ -1,0 +1,299 @@
+/* --------------------------------------------------
+   Orange + white theme
+   -------------------------------------------------- */
+
+   :root {
+    --orange: #f28c28;
+    --orange-dark: #d96f0b;
+    --orange-light: #fff3e6;
+    --white: #ffffff;
+    --text: #333333;
+    --muted: #777777;
+    --border: #e5e5e5;
+    --shadow: 0 4px 18px rgba(0, 0, 0, 0.16);
+}
+
+html,
+body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+}
+
+body {
+    overflow: hidden;
+    font-family: Arial, Helvetica, sans-serif;
+    color: var(--text);
+    background: var(--white);
+}
+
+#app {
+    width: 100%;
+    height: 100%;
+    position: relative;
+}
+
+#map {
+    width: 100%;
+    height: 100%;
+}
+
+/* --------------------------------------------------
+   Sidebar
+   -------------------------------------------------- */
+
+#sidebar {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    width: 310px;
+    padding: 0;
+    background: var(--white);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    z-index: 10;
+    overflow: visible;
+}
+
+.sidebar-header {
+    padding: 20px 20px 15px;
+    background: var(--orange);
+    color: var(--white);
+    border-radius: 12px 12px 0 0;
+}
+
+.sidebar-header h1 {
+    margin: 0 0 6px;
+    font-size: 21px;
+    line-height: 1.25;
+}
+
+.sidebar-header p {
+    margin: 0;
+    font-size: 13px;
+    opacity: 0.95;
+}
+
+/* --------------------------------------------------
+   Year dropdown
+   -------------------------------------------------- */
+
+#year-control {
+    padding: 18px 20px 10px;
+}
+
+#year-control > label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.dropdown {
+    position: relative;
+}
+
+.dropdown-button {
+    width: 100%;
+    min-height: 44px;
+    padding: 10px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border: 1px solid #d8d8d8;
+    border-radius: 7px;
+    background: var(--white);
+    color: var(--text);
+    font-size: 14px;
+    cursor: pointer;
+    text-align: left;
+    box-sizing: border-box;
+}
+
+.dropdown-button:hover,
+.dropdown.open .dropdown-button {
+    border-color: var(--orange);
+    box-shadow: 0 0 0 2px rgba(242, 140, 40, 0.12);
+}
+
+.dropdown-arrow {
+    color: var(--orange-dark);
+    font-size: 18px;
+    line-height: 1;
+    transition: transform 0.15s ease;
+}
+
+.dropdown.open .dropdown-arrow {
+    transform: rotate(180deg);
+}
+
+.dropdown-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    z-index: 30;
+}
+
+.year-options {
+    padding: 7px 0;
+}
+
+.year-option {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 9px 12px;
+    font-size: 14px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.year-option:hover {
+    background: var(--orange-light);
+}
+
+.year-option input {
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    accent-color: var(--orange);
+    cursor: pointer;
+}
+
+.color-dot {
+    width: 13px;
+    height: 13px;
+    flex: 0 0 13px;
+    display: inline-block;
+    border-radius: 50%;
+    border: 1px solid rgba(0, 0, 0, 0.15);
+}
+
+/* The same colors are used for dropdown, legend and map points. */
+.year-2020 {
+    background: #e67e22;
+}
+
+.year-2021 {
+    background: #3498db;
+}
+
+.year-2022 {
+    background: #2ecc71;
+}
+
+.year-2023 {
+    background: #9b59b6;
+}
+
+.year-2024 {
+    background: #f1c40f;
+}
+
+.year-2025 {
+    background: #e74c3c;
+}
+
+.dropdown-footer {
+    padding: 10px;
+    border-top: 1px solid var(--border);
+    background: #fafafa;
+}
+
+#view-button {
+    width: 100%;
+    padding: 10px 12px;
+    border: none;
+    border-radius: 6px;
+    background: var(--orange);
+    color: var(--white);
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+#view-button:hover {
+    background: var(--orange-dark);
+}
+
+#clear-button {
+    width: 100%;
+    margin-top: 8px;
+    padding: 10px 12px;
+    border: 1px solid var(--orange);
+    border-radius: 6px;
+    background: var(--white);
+    color: var(--orange-dark);
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+#clear-button:hover {
+    background: var(--orange-light);
+}
+
+/* --------------------------------------------------
+   Legend
+   -------------------------------------------------- */
+
+#legend {
+    margin: 5px 20px 0;
+    padding: 12px 0 15px;
+    border-top: 1px solid var(--border);
+}
+
+#legend h2 {
+    margin: 0 0 8px;
+    font-size: 14px;
+}
+
+.legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-right: 10px;
+    margin-bottom: 6px;
+    font-size: 12px;
+}
+
+/* --------------------------------------------------
+   Information area
+   -------------------------------------------------- */
+
+#info {
+    margin: 0 20px 20px;
+    padding: 11px 12px;
+    border-left: 3px solid var(--orange);
+    border-radius: 4px;
+    background: var(--orange-light);
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+#info p {
+    margin: 0;
+}
+
+.error-message {
+    color: #b23b2d;
+}
+
+/* --------------------------------------------------
+   Deck.gl tooltip
+   -------------------------------------------------- */
+
+.tooltip-content {
+    line-height: 1.45;
+}
+
+.tooltip-year {
+    font-weight: 700;
+}

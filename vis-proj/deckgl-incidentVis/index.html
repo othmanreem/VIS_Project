@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Calderdale Collisions Visualization</title>
+</head>
+
+<body>
+    <div id="app">
+        <div id="map"></div>
+
+        <aside id="sidebar">
+            <div class="sidebar-header">
+                <h1>Collisions Visualization</h1>
+                <p>Explore road collisions by year.</p>
+            </div>
+
+            <div id="year-control">
+                <label for="year-select">Select year(s)</label>
+
+                <div id="year-dropdown" class="dropdown">
+                    <button
+                        id="year-dropdown-button"
+                        class="dropdown-button"
+                        type="button"
+                        aria-expanded="false"
+                        aria-controls="year-menu"
+                    >
+                        <span id="selected-years-text">Select year(s)</span>
+                        <span class="dropdown-arrow">▾</span>
+                    </button>
+
+                    <div id="year-menu" class="dropdown-menu" hidden>
+                        <div class="year-options">
+                            <label class="year-option">
+                                <input type="checkbox" value="2020">
+                                <span class="color-dot year-2020"></span>
+                                <span>2020</span>
+                            </label>
+
+                            <label class="year-option">
+                                <input type="checkbox" value="2021">
+                                <span class="color-dot year-2021"></span>
+                                <span>2021</span>
+                            </label>
+
+                            <label class="year-option">
+                                <input type="checkbox" value="2022">
+                                <span class="color-dot year-2022"></span>
+                                <span>2022</span>
+                            </label>
+
+                            <label class="year-option">
+                                <input type="checkbox" value="2023">
+                                <span class="color-dot year-2023"></span>
+                                <span>2023</span>
+                            </label>
+
+                            <label class="year-option">
+                                <input type="checkbox" value="2024">
+                                <span class="color-dot year-2024"></span>
+                                <span>2024</span>
+                            </label>
+
+                            <label class="year-option">
+                                <input type="checkbox" value="2025">
+                                <span class="color-dot year-2025"></span>
+                                <span>2025</span>
+                            </label>
+                        </div>
+
+                        <div class="dropdown-footer">
+                            <button id="view-button" type="button">View</button>
+                            <button id="clear-button" type="button">Clear</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="legend">
+                <h2>Years</h2>
+                <div class="legend-item">
+                    <span class="color-dot year-2020"></span><span>2020</span>
+                </div>
+                <div class="legend-item">
+                    <span class="color-dot year-2021"></span><span>2021</span>
+                </div>
+                <div class="legend-item">
+                    <span class="color-dot year-2022"></span><span>2022</span>
+                </div>
+                <div class="legend-item">
+                    <span class="color-dot year-2023"></span><span>2023</span>
+                </div>
+                <div class="legend-item">
+                    <span class="color-dot year-2024"></span><span>2024</span>
+                </div>
+                <div class="legend-item">
+                    <span class="color-dot year-2025"></span><span>2025</span>
+                </div>
+            </div>
+
+            <div id="info">
+                <p>Select one or more years and press <strong>View</strong> to display the collisions.</p>
+            </div>
+        </aside>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+</body>
+</html>
