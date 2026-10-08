@@ -143,6 +143,12 @@ body {
 
 .year-options {
     padding: 7px 0;
+    max-height: 55vh;
+    overflow-y: auto;
+}
+
+[hidden] {
+    display: none !important;
 }
 
 .year-option {
@@ -296,4 +302,75 @@ body {
 
 .tooltip-year {
     font-weight: 700;
+}
+
+/* --------------------------------------------------
+   Year rows, filter sub-menus and category options
+   -------------------------------------------------- */
+
+.year-row,
+.category-row {
+    display: flex;
+    align-items: center;
+}
+
+.year-row .year-option {
+    flex: 1;
+}
+
+.expand-btn {
+    padding: 6px 12px;
+    border: none;
+    background: none;
+    color: var(--orange-dark);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    transition: transform 0.15s ease;
+}
+
+.expand-btn.expanded {
+    transform: rotate(90deg);
+}
+
+.sub-menu {
+    padding: 2px 8px 8px 38px;
+    background: #fffaf5;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+}
+
+.category-option {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    user-select: none;
+}
+
+.option-list {
+    padding: 0 0 4px 24px;
+}
+
+.sub-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.category-option input,
+.sub-option input {
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    accent-color: var(--orange);
+    cursor: pointer;
 }

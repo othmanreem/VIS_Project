@@ -1,6 +1,7 @@
 import { Deck } from '@deck.gl/core';
-import { BitmapLayer, GeoJsonLayer } from '@deck.gl/layers';
+import { BitmapLayer, GeoJsonLayer, TextLayer } from '@deck.gl/layers';
 import { TileLayer } from '@deck.gl/geo-layers';
+import { CATEGORIES } from './codes.js';
 import './style.css';
 
 const INITIAL_VIEW_STATE = {
@@ -14,7 +15,7 @@ const INITIAL_VIEW_STATE = {
 // --------------------------------------------------
 // One fixed color for each year.
 // The same color is used in the dropdown, legend,
-// and collision points on the map.
+// collision points and text labels on the map.
 // --------------------------------------------------
 const YEAR_COLORS = {
     2020: [230, 126, 34, 210],
@@ -56,37 +57,133 @@ const mapLayer = new TileLayer({
 });
 
 // --------------------------------------------------
-// Load the GeoJSON belonging to one year.
+// Data loading (cached, so re-pressing View is fast)
 // Expected files:
-// /calderdale_collisions_2020.geojson
-// ...
-// /calderdale_collisions_2025.geojson
+// /calderdale_collisions_YYYY.geojson
+// /calderdale_vehicles_YYYY.geojson   (only needed for driver filters)
 // --------------------------------------------------
-async function loadYearData(year) {
-    const response = await fetch(`/calderdale_collisions_${year}.geojson`);
+const fetchCache = new Map();
 
-    if (!response.ok) {
-        throw new Error(`Could not load collision data for ${year}.`);
+function fetchGeoJson(url, errorMessage) {
+    if (!fetchCache.has(url)) {
+        const request = fetch(url)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(errorMessage);
+                }
+                return response.json();
+            })
+            .catch(error => {
+                fetchCache.delete(url);
+                throw error;
+            });
+
+        fetchCache.set(url, request);
     }
 
-    return await response.json();
+    return fetchCache.get(url);
+}
+
+function loadYearData(year) {
+    return fetchGeoJson(
+        `collisions/calderdale_collisions_${year}.geojson`,
+        `Could not load collision data for ${year}.`
+    );
 }
 
 // --------------------------------------------------
-// Create one layer per selected year.
-// This makes it possible to display multiple years
-// simultaneously while keeping their colors separate.
+// Vehicles are joined to collisions with collision_index.
+// For every collision we keep, per vehicle-based category,
+// the set of codes found among its drivers.
+// Result: Map(collision_index -> { driverGender: Set, driverAge: Set })
 // --------------------------------------------------
-function createYearLayer(year, data) {
-    return new GeoJsonLayer({
+const vehicleIndexCache = new Map();
+const VEHICLE_CATEGORIES = CATEGORIES.filter(cat => cat.source === 'vehicle');
+
+async function loadVehicleIndex(year) {
+    if (vehicleIndexCache.has(year)) {
+        return vehicleIndexCache.get(year);
+    }
+
+    const data = await fetchGeoJson(
+        `vehicles/calderdale_vehicles_${year}.geojson`,
+        `Could not load vehicle data for ${year}.`
+    );
+
+    const index = new Map();
+
+    for (const feature of data.features) {
+        const props = feature.properties || {};
+        let entry = index.get(props.collision_index);
+
+        if (!entry) {
+            entry = {};
+            VEHICLE_CATEGORIES.forEach(cat => {
+                entry[cat.key] = new Set();
+            });
+            index.set(props.collision_index, entry);
+        }
+
+        VEHICLE_CATEGORIES.forEach(cat => {
+            const value = props[cat.field];
+            if (value !== undefined && value !== null) {
+                entry[cat.key].add(String(value));
+            }
+        });
+    }
+
+    vehicleIndexCache.set(year, index);
+    return index;
+}
+
+// --------------------------------------------------
+// Codes of one collision for one category.
+// Collision-based categories have a single code.
+// Vehicle-based categories can have several (one per driver).
+// --------------------------------------------------
+function getCodes(category, feature, vehicleIndex) {
+    if (category.source === 'collision') {
+        const value = feature.properties?.[category.field];
+        return value === undefined || value === null ? [] : [String(value)];
+    }
+
+    const entry = vehicleIndex?.get(feature.properties?.collision_index);
+    return entry ? Array.from(entry[category.key]) : [];
+}
+
+// code -> label lookup for each category (built once)
+const LABELS = {};
+CATEGORIES.forEach(cat => {
+    LABELS[cat.key] = Object.fromEntries(cat.codes.map(c => [c.code, c.label]));
+});
+
+// --------------------------------------------------
+// Layers for one year:
+//  - one scatterplot (GeoJsonLayer), filtered by the chosen options
+//  - one TextLayer per category that has something selected,
+//    showing the code's label for every displayed collision
+//    (same color as the year's points)
+// --------------------------------------------------
+function createYearLayers(year, collisions, vehicleIndex, filters) {
+    const activeCategories = CATEGORIES.filter(cat => filters[cat.key]);
+
+    // A collision is kept if, for every active category,
+    // at least one of its codes is among the selected options.
+    const features = collisions.features.filter(feature =>
+        feature.geometry &&
+        activeCategories.every(cat =>
+            getCodes(cat, feature, vehicleIndex).some(code => filters[cat.key].has(code))
+        )
+    );
+
+    const pointLayer = new GeoJsonLayer({
         id: `collisions-${year}`,
-        data,
+        data: { type: 'FeatureCollection', features },
 
         pointType: 'circle',
         filled: true,
         stroked: true,
 
-        // Different color for each selected year.
         getFillColor: YEAR_COLORS[year],
         getLineColor: [255, 255, 255, 255],
 
@@ -103,6 +200,51 @@ function createYearLayer(year, data) {
             getFillColor: [year]
         }
     });
+
+    const textColor = [...YEAR_COLORS[year].slice(0, 3), 255];
+
+    const textLayers = activeCategories.map((cat, i) => {
+        const labelData = [];
+
+        for (const feature of features) {
+            // Labels come from the guide's mapping, whatever the user selected.
+            const labels = [...new Set(
+                getCodes(cat, feature, vehicleIndex)
+                    .map(code => LABELS[cat.key][code])
+                    .filter(Boolean)
+            )];
+
+            if (labels.length > 0) {
+                labelData.push({
+                    position: feature.geometry.coordinates,
+                    text: `${cat.short}: ${labels.join(', ')}`
+                });
+            }
+        }
+
+        return new TextLayer({
+            id: `labels-${year}-${cat.key}`,
+            data: labelData,
+
+            getPosition: d => d.position,
+            getText: d => d.text,
+            getColor: textColor,
+            getSize: 12,
+
+            // Stack labels of different categories above the point
+            getPixelOffset: [0, -(12 + i * 15)],
+            getTextAnchor: 'middle',
+            getAlignmentBaseline: 'bottom',
+
+            fontFamily: 'Arial, Helvetica, sans-serif',
+            fontWeight: 700,
+            fontSettings: { sdf: true },
+            outlineWidth: 3,
+            outlineColor: [255, 255, 255, 255]
+        });
+    });
+
+    return { pointLayer, textLayers, count: features.length };
 }
 
 // --------------------------------------------------
@@ -162,12 +304,86 @@ const deck = new Deck({
 });
 
 // --------------------------------------------------
+// Build the year rows + filter sub-menus
+// --------------------------------------------------
+const yearOptions = document.getElementById('year-options');
+
+function buildYearMenu() {
+    yearOptions.innerHTML = YEARS.map(year => `
+        <div class="year-block" data-year="${year}">
+            <div class="year-row">
+                <label class="year-option">
+                    <input type="checkbox" class="year-checkbox" value="${year}">
+                    <span class="color-dot year-${year}"></span>
+                    <span>${year}</span>
+                </label>
+                <button type="button" class="expand-btn year-toggle"
+                        aria-expanded="false"
+                        aria-label="Filters for ${year}">▸</button>
+            </div>
+
+            <div class="sub-menu" hidden>
+                ${CATEGORIES.map(cat => `
+                    <div class="category" data-cat="${cat.key}">
+                        <div class="category-row">
+                            <label class="category-option">
+                                <input type="checkbox" class="category-checkbox">
+                                <span>${cat.label}</span>
+                            </label>
+                            <button type="button" class="expand-btn category-toggle"
+                                    aria-expanded="false"
+                                    aria-label="Show ${cat.label} options">▸</button>
+                        </div>
+
+                        <div class="option-list" hidden>
+                            ${cat.codes.map(c => `
+                                <label class="sub-option">
+                                    <input type="checkbox" class="code-checkbox" value="${c.code}">
+                                    <span>${c.label}</span>
+                                </label>
+                            `).join('')}
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+    `).join('');
+}
+
+buildYearMenu();
+
+// --------------------------------------------------
+// Read what the user has selected.
+// Returns [{ year, filters: { categoryKey: Set(codes) } }]
+// Categories with nothing ticked are not filtered.
+// --------------------------------------------------
+function getSelections() {
+    return Array.from(yearOptions.querySelectorAll('.year-block'))
+        .filter(block => block.querySelector('.year-checkbox').checked)
+        .map(block => {
+            const filters = {};
+
+            block.querySelectorAll('.category').forEach(categoryEl => {
+                const codes = Array.from(
+                    categoryEl.querySelectorAll('.code-checkbox:checked')
+                ).map(input => input.value);
+
+                if (codes.length > 0) {
+                    filters[categoryEl.dataset.cat] = new Set(codes);
+                }
+            });
+
+            return { year: block.dataset.year, filters };
+        });
+}
+
+// --------------------------------------------------
 // Render selected years
 // --------------------------------------------------
-async function showSelectedYears(selectedYears) {
+async function showSelectedYears(selections) {
     const info = document.getElementById('info');
 
-    if (selectedYears.length === 0) {
+    if (selections.length === 0) {
         deck.setProps({
             layers: [mapLayer]
         });
@@ -178,36 +394,39 @@ async function showSelectedYears(selectedYears) {
         return;
     }
 
-    info.innerHTML = `<p>Loading ${selectedYears.join(', ')}...</p>`;
+    const years = selections.map(s => s.year);
+    info.innerHTML = `<p>Loading ${years.join(', ')}...</p>`;
 
     try {
         const results = await Promise.all(
-            selectedYears.map(async year => {
-                const data = await loadYearData(year);
-                return {
-                    year,
-                    data
-                };
+            selections.map(async ({ year, filters }) => {
+                const needsVehicles = VEHICLE_CATEGORIES.some(cat => filters[cat.key]);
+
+                const [collisions, vehicleIndex] = await Promise.all([
+                    loadYearData(year),
+                    needsVehicles ? loadVehicleIndex(year) : Promise.resolve(null)
+                ]);
+
+                return createYearLayers(year, collisions, vehicleIndex, filters);
             })
         );
 
-        const collisionLayers = results.map(({ year, data }) =>
-            createYearLayer(year, data)
-        );
+        // Points first, text labels on top of all points.
+        const pointLayers = results.map(r => r.pointLayer);
+        const textLayers = results.flatMap(r => r.textLayers);
+        const total = results.reduce((sum, r) => sum + r.count, 0);
 
         deck.setProps({
-            layers: [
-                mapLayer,
-                ...collisionLayers
-            ]
+            layers: [mapLayer, ...pointLayers, ...textLayers]
         });
 
-        const yearLabel = selectedYears.length === 1 ? 'year' : 'years';
+        const yearLabel = years.length === 1 ? 'year' : 'years';
 
         info.innerHTML = `
             <p>
-                Showing <strong>${selectedYears.length}</strong> ${yearLabel}:
-                <strong>${selectedYears.join(', ')}</strong>
+                Showing <strong>${total}</strong> collisions for
+                <strong>${years.length}</strong> ${yearLabel}:
+                <strong>${years.join(', ')}</strong>
             </p>
         `;
     } catch (error) {
@@ -216,7 +435,8 @@ async function showSelectedYears(selectedYears) {
         info.innerHTML = `
             <p class="error-message">
                 Could not load one or more selected years.
-                Make sure the corresponding GeoJSON files exist.
+                Make sure the corresponding GeoJSON files exist
+                (collisions, and vehicles for the driver filters).
             </p>
         `;
     }
@@ -230,10 +450,17 @@ const dropdownButton = document.getElementById('year-dropdown-button');
 const yearMenu = document.getElementById('year-menu');
 const selectedYearsText = document.getElementById('selected-years-text');
 const viewButton = document.getElementById('view-button');
+const clearButton = document.getElementById('clear-button');
+
+function closeDropdown() {
+    yearMenu.hidden = true;
+    dropdownButton.setAttribute('aria-expanded', 'false');
+    dropdown.classList.remove('open');
+}
 
 function updateSelectedYearsText() {
     const selectedYears = Array.from(
-        document.querySelectorAll('#year-menu input[type="checkbox"]:checked')
+        yearOptions.querySelectorAll('.year-checkbox:checked')
     ).map(input => input.value);
 
     if (selectedYears.length === 0) {
@@ -245,6 +472,23 @@ function updateSelectedYearsText() {
     }
 }
 
+// Sync a category checkbox with its option checkboxes
+// (checked = all, indeterminate = some, unchecked = none).
+function syncCategoryCheckbox(categoryEl) {
+    const boxes = Array.from(categoryEl.querySelectorAll('.code-checkbox'));
+    const checkedCount = boxes.filter(box => box.checked).length;
+    const parent = categoryEl.querySelector('.category-checkbox');
+
+    parent.checked = checkedCount === boxes.length;
+    parent.indeterminate = checkedCount > 0 && checkedCount < boxes.length;
+}
+
+function setExpanded(button, panel, expanded) {
+    panel.hidden = !expanded;
+    button.classList.toggle('expanded', expanded);
+    button.setAttribute('aria-expanded', String(expanded));
+}
+
 dropdownButton.addEventListener('click', () => {
     const isOpen = !yearMenu.hidden;
 
@@ -253,23 +497,83 @@ dropdownButton.addEventListener('click', () => {
     dropdown.classList.toggle('open', !isOpen);
 });
 
-document.querySelectorAll('#year-menu input[type="checkbox"]').forEach(input => {
-    input.addEventListener('change', updateSelectedYearsText);
+// Expand / collapse the sub-menus
+yearOptions.addEventListener('click', event => {
+    const yearToggle = event.target.closest('.year-toggle');
+    const categoryToggle = event.target.closest('.category-toggle');
+
+    if (yearToggle) {
+        const panel = yearToggle.closest('.year-block').querySelector('.sub-menu');
+        setExpanded(yearToggle, panel, panel.hidden);
+    } else if (categoryToggle) {
+        const panel = categoryToggle.closest('.category').querySelector('.option-list');
+        setExpanded(categoryToggle, panel, panel.hidden);
+    }
 });
 
-const clearButton = document.getElementById('clear-button');
+// Checkbox logic
+yearOptions.addEventListener('change', event => {
+    const input = event.target;
+    const block = input.closest('.year-block');
+
+    if (input.classList.contains('category-checkbox')) {
+        // Selecting the category selects every option inside it.
+        const categoryEl = input.closest('.category');
+        categoryEl.querySelectorAll('.code-checkbox').forEach(box => {
+            box.checked = input.checked;
+        });
+        input.indeterminate = false;
+
+        // Make the options visible when a category gets selected.
+        if (input.checked) {
+            setExpanded(
+                categoryEl.querySelector('.category-toggle'),
+                categoryEl.querySelector('.option-list'),
+                true
+            );
+        }
+    }
+
+    if (input.classList.contains('code-checkbox')) {
+        syncCategoryCheckbox(input.closest('.category'));
+    }
+
+    // Choosing any filter automatically selects that year.
+    if (
+        (input.classList.contains('category-checkbox') ||
+            input.classList.contains('code-checkbox')) &&
+        block.querySelector('.code-checkbox:checked')
+    ) {
+        block.querySelector('.year-checkbox').checked = true;
+    }
+
+    updateSelectedYearsText();
+});
+
+viewButton.addEventListener('click', async () => {
+    await showSelectedYears(getSelections());
+    closeDropdown();
+});
 
 clearButton.addEventListener('click', () => {
-    // Uncheck every year checkbox
-    document
-        .querySelectorAll('#year-menu input[type="checkbox"]')
-        .forEach(input => {
-            input.checked = false;
-        });
+    // Uncheck every year, category and option checkbox
+    yearOptions.querySelectorAll('input[type="checkbox"]').forEach(input => {
+        input.checked = false;
+        input.indeterminate = false;
+    });
+
+    // Collapse all sub-menus
+    yearOptions.querySelectorAll('.sub-menu, .option-list').forEach(panel => {
+        panel.hidden = true;
+    });
+    yearOptions.querySelectorAll('.expand-btn').forEach(button => {
+        button.classList.remove('expanded');
+        button.setAttribute('aria-expanded', 'false');
+    });
 
     updateSelectedYearsText();
 
-    // Remove all collision layers, keeping only the basemap
+    // Remove all collision and label layers, keeping only the basemap
     deck.setProps({
         layers: [mapLayer]
     });
@@ -278,29 +582,13 @@ clearButton.addEventListener('click', () => {
         <p>Map cleared. Select one or more years and press <strong>View</strong> to display the collisions.</p>
     `;
 
-    yearMenu.hidden = true;
-    dropdownButton.setAttribute('aria-expanded', 'false');
-    dropdown.classList.remove('open');
-});
-
-viewButton.addEventListener('click', async () => {
-    const selectedYears = Array.from(
-        document.querySelectorAll('#year-menu input[type="checkbox"]:checked')
-    ).map(input => input.value);
-
-    await showSelectedYears(selectedYears);
-
-    yearMenu.hidden = true;
-    dropdownButton.setAttribute('aria-expanded', 'false');
-    dropdown.classList.remove('open');
+    closeDropdown();
 });
 
 // Close the dropdown when clicking outside it.
 document.addEventListener('click', event => {
     if (!dropdown.contains(event.target)) {
-        yearMenu.hidden = true;
-        dropdownButton.setAttribute('aria-expanded', 'false');
-        dropdown.classList.remove('open');
+        closeDropdown();
     }
 });
 
