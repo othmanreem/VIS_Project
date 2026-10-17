@@ -61,8 +61,8 @@ const INITIAL_VIEW_STATE = getOverviewViewState();
 
 // --------------------------------------------------
 // One fixed color for each year.
-// The same color is used in the year choices,
-// collision points and text labels on the map.
+// The same color is used in the year choices and points.
+// Optional map labels use neutral text for readability.
 // --------------------------------------------------
 const YEAR_COLORS = {
   2020: [230, 126, 34, 210],
@@ -200,144 +200,360 @@ CATEGORIES.forEach((cat) => {
 });
 
 // --------------------------------------------------
-// Layers for one year:
-//  - one scatterplot (GeoJsonLayer), filtered by the chosen options
-//  - one TextLayer per category that has something selected,
-//    showing the code's label for every displayed collision
-//    (same color as the year's points)
+// Displayed records, selected collision and label controls
+// --------------------------------------------------
+let displayedYears = [];
+let displayedFeatures = [];
+let selectedCollision = null;
+let selectedGroup = [];
+let selectedDrivers = null;
+let detailsRequest = 0;
+let labelFrame = 0;
+
+const showLabelsInput = document.getElementById("show-labels");
+const labelField = document.getElementById("label-field");
+const labelStatus = document.getElementById("label-status");
+const detailsPanel = document.getElementById("collision-details");
+const detailsContent = document.getElementById("details-content");
+const labelContext = document.createElement("canvas").getContext("2d");
+
+// Labels verified against the stored official DfT code guide.
+const SURFACE_LABELS = {
+  1: "Dry", 2: "Wet or damp", 3: "Snow", 4: "Frost or ice",
+  5: "Flood over 3 cm deep", 6: "Oil or diesel", 7: "Mud",
+  9: "Unknown (self-reported)",
+};
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[character]);
+}
+
+function recordedValue(value) {
+  return value === undefined || value === null || value === "" || String(value) === "-1"
+    ? "Not recorded"
+    : String(value);
+}
+
+function categoryLabel(key, value) {
+  const recorded = recordedValue(value);
+  return recorded === "Not recorded" ? recorded : LABELS[key]?.[String(value)] || `Unknown code (${recorded})`;
+}
+
+function collisionKey(feature) {
+  const p = feature.properties;
+  return `${p.collision_year}:${p.collision_index}`;
+}
+
+function collisionRows(feature) {
+  const p = feature.properties;
+  const speed = recordedValue(p.speed_limit);
+  const surface = recordedValue(p.road_surface_conditions);
+
+  return [
+    ["Severity", categoryLabel("severity", p.collision_severity)],
+    ["Date", recordedValue(p.date)],
+    ["Time", recordedValue(p.time)],
+    ["Lighting", categoryLabel("lighting", p.light_conditions)],
+    ["Weather", categoryLabel("weather", p.weather_conditions)],
+    ["Road class", categoryLabel("roadType", p.first_road_class)],
+    ["Road number", recordedValue(p.first_road_number)],
+    ["Road surface", SURFACE_LABELS[surface] || surface],
+    ["Speed limit", speed === "Not recorded" ? speed : `${speed} mph`],
+    ["Vehicles", recordedValue(p.number_of_vehicles)],
+    ["Casualties", recordedValue(p.number_of_casualties)],
+  ];
+}
+
+// --------------------------------------------------
+// One point layer per year. Filters change the records;
+// label visibility is controlled separately.
 // --------------------------------------------------
 function createYearLayers(year, collisions, vehicleIndex, filters) {
   const activeCategories = CATEGORIES.filter((cat) => filters[cat.key]);
-
-  // A collision is kept if, for every active category,
-  // at least one of its codes is among the selected options.
   const features = collisions.features.filter(
-    (feature) =>
-      feature.geometry &&
-      activeCategories.every((cat) =>
-        getCodes(cat, feature, vehicleIndex).some((code) =>
-          filters[cat.key].has(code),
-        ),
-      ),
+    (feature) => feature.geometry && activeCategories.every((cat) =>
+      getCodes(cat, feature, vehicleIndex).some((code) => filters[cat.key].has(code)),
+    ),
   );
 
   const pointLayer = new GeoJsonLayer({
     id: `collisions-${year}`,
     data: { type: "FeatureCollection", features },
-
     pointType: "circle",
     filled: true,
     stroked: true,
-
     getFillColor: YEAR_COLORS[year],
     getLineColor: [255, 255, 255, 255],
-
     getPointRadius: 45,
     pointRadiusMinPixels: 4,
     pointRadiusMaxPixels: 12,
-
     lineWidthMinPixels: 1,
-
     pickable: true,
     autoHighlight: true,
-
-    updateTriggers: {
-      getFillColor: [year],
-    },
+    highlightColor: [40, 44, 41, 70],
+    updateTriggers: { getFillColor: [year] },
   });
 
-  const textColor = [...YEAR_COLORS[year].slice(0, 3), 255];
-
-  const textLayers = activeCategories.map((cat, i) => {
-    const labelData = [];
-
-    for (const feature of features) {
-      // Labels come from the guide's mapping, whatever the user selected.
-      const labels = [
-        ...new Set(
-          getCodes(cat, feature, vehicleIndex)
-            .map((code) => LABELS[cat.key][code])
-            .filter(Boolean),
-        ),
-      ];
-
-      if (labels.length > 0) {
-        labelData.push({
-          position: feature.geometry.coordinates,
-          text: `${cat.short}: ${labels.join(", ")}`,
-        });
-      }
-    }
-
-    return new TextLayer({
-      id: `labels-${year}-${cat.key}`,
-      data: labelData,
-
-      getPosition: (d) => d.position,
-      getText: (d) => d.text,
-      getColor: textColor,
-      getSize: 12,
-
-      // Stack labels of different categories above the point
-      getPixelOffset: [0, -(12 + i * 15)],
-      getTextAnchor: "middle",
-      getAlignmentBaseline: "bottom",
-
-      fontFamily: "Arial, Helvetica, sans-serif",
-      fontWeight: 700,
-      fontSettings: { sdf: true },
-      outlineWidth: 3,
-      outlineColor: [255, 255, 255, 255],
-    });
-  });
-
-  return { pointLayer, textLayers, count: features.length };
+  return { pointLayer, features };
 }
 
 // --------------------------------------------------
-// Tooltip
+// Short, neutral labels at closer zooms only.
+// A small screen grid keeps labels clear of other labels,
+// point symbols, panel edges and the visible controls.
+// All collision points remain on the map.
 // --------------------------------------------------
-function getTooltip({ object }) {
-  if (!object) {
+function createLabelLayer() {
+  labelField.disabled = !showLabelsInput.checked;
+
+  if (!showLabelsInput.checked) {
+    labelStatus.textContent = "Hover for details. Click to keep them open.";
     return null;
   }
 
-  const p = object.properties || {};
+  if (displayedFeatures.length === 0) {
+    labelStatus.textContent = "Apply a year selection to show labels.";
+    return null;
+  }
 
+  const viewport = deck.getViewports()[0];
+  const minimumZoom = Math.max(12, deck.props.initialViewState.minZoom + 1);
+  if (viewport.zoom < minimumZoom) {
+    labelStatus.textContent = "Zoom in to reveal labels. All dots remain visible.";
+    return null;
+  }
+
+  const mapRect = document.getElementById("map").getBoundingClientRect();
+  const panels = ["sidebar", "map-display", "collision-details"]
+    .map((id) => document.getElementById(id))
+    .filter((panel) => !panel.hidden)
+    .map((panel) => {
+      const rect = panel.getBoundingClientRect();
+      return { left: rect.left - mapRect.left - 6, top: rect.top - mapRect.top - 6,
+        right: rect.right - mapRect.left + 6, bottom: rect.bottom - mapRect.top + 6 };
+    });
+
+  const cells = new Map();
+  const cellSize = 64;
+  function cellKeys(box) {
+    const keys = [];
+    for (let x = Math.floor(box.left / cellSize); x <= Math.floor(box.right / cellSize); x++) {
+      for (let y = Math.floor(box.top / cellSize); y <= Math.floor(box.bottom / cellSize); y++) {
+        keys.push(`${x}:${y}`);
+      }
+    }
+    return keys;
+  }
+  function reserve(box) {
+    cellKeys(box).forEach((key) => {
+      if (!cells.has(key)) cells.set(key, []);
+      cells.get(key).push(box);
+    });
+  }
+  function overlaps(box) {
+    return cellKeys(box).some((key) => (cells.get(key) || []).some((other) =>
+      box.left < other.right && box.right > other.left && box.top < other.bottom && box.bottom > other.top,
+    ));
+  }
+
+  panels.forEach(reserve);
+  const points = displayedFeatures.map((feature) => {
+    const [x, y] = viewport.project(feature.geometry.coordinates);
+    const radius = Math.max(4, Math.min(12, 45 * viewport.distanceScales.unitsPerMeter[0] * viewport.scale));
+    const key = collisionKey(feature);
+    // Stable ordering mixes years instead of always favouring the first year.
+    const priority = selectedCollision && key === collisionKey(selectedCollision) ? -1
+      : Array.from(key).reduce((hash, character) => (hash * 31 + character.charCodeAt(0)) >>> 0, 0);
+    return { feature, x, y, radius, priority };
+  }).filter(({ x, y }) => x >= 0 && y >= 0 && x <= viewport.width && y <= viewport.height);
+
+  points.forEach(({ x, y, radius }) => reserve({
+    left: x - radius - 2, right: x + radius + 2,
+    top: y - radius - 2, bottom: y + radius + 2,
+  }));
+  points.sort((a, b) => a.priority - b.priority);
+
+  const category = CATEGORIES.find((cat) => cat.key === labelField.value);
+  const labels = [];
+  labelContext.font = '500 12px "Segoe UI", Arial';
+
+  for (const { feature, x, y, radius } of points) {
+    if (panels.some((box) => x >= box.left && x <= box.right && y >= box.top && y <= box.bottom)) continue;
+    const text = categoryLabel(category.key, feature.properties[category.field]);
+    const width = Math.ceil(labelContext.measureText(text).width) + 6;
+    const height = 20;
+    const distance = radius + 7;
+    const candidates = [
+      [distance + width / 2, 0], [-distance - width / 2, 0],
+      [0, -distance - height / 2], [0, distance + height / 2],
+      [distance + width / 2, -distance - height / 2],
+      [-distance - width / 2, distance + height / 2],
+    ];
+
+    for (const offset of candidates) {
+      const box = { left: x + offset[0] - width / 2, right: x + offset[0] + width / 2,
+        top: y + offset[1] - height / 2, bottom: y + offset[1] + height / 2 };
+      if (box.left < 8 || box.top < 8 || box.right > viewport.width - 8 || box.bottom > viewport.height - 8 || overlaps(box)) continue;
+      reserve(box);
+      labels.push({ position: feature.geometry.coordinates, text, offset });
+      break;
+    }
+  }
+
+  labelStatus.textContent = labels.length === 0
+    ? "No room for labels here. Hover a dot for details."
+    : `${labels.length} labels shown · overlaps hidden, dots unchanged`;
+
+  return new TextLayer({
+    id: "collision-labels",
+    data: labels,
+    getPosition: (d) => d.position,
+    getText: (d) => d.text,
+    getPixelOffset: (d) => d.offset,
+    getColor: [40, 44, 41, 255],
+    getSize: 12,
+    getTextAnchor: "middle",
+    getAlignmentBaseline: "center",
+    fontFamily: "Segoe UI, Arial, sans-serif",
+    fontWeight: 500,
+    fontSettings: { sdf: true },
+    outlineWidth: 2,
+    outlineColor: [255, 254, 250, 255],
+    pickable: false,
+  });
+}
+
+function refreshMapLayers() {
+  const layers = [mapLayer, ...displayedYears.map((result) => result.pointLayer)];
+
+  if (selectedCollision) {
+    layers.push(new GeoJsonLayer({
+      id: "selected-collision",
+      data: { type: "FeatureCollection", features: [selectedCollision] },
+      pointType: "circle", filled: false, stroked: true,
+      getLineColor: [40, 44, 41, 255], getPointRadius: 55,
+      pointRadiusMinPixels: 7, pointRadiusMaxPixels: 16,
+      lineWidthMinPixels: 2, pickable: false,
+    }));
+  }
+
+  const labels = createLabelLayer();
+  if (labels) layers.push(labels);
+  deck.setProps({ layers });
+}
+
+function scheduleLabelUpdate() {
+  if (!showLabelsInput.checked || labelFrame) return;
+  labelFrame = requestAnimationFrame(() => {
+    labelFrame = 0;
+    refreshMapLayers();
+  });
+}
+
+// --------------------------------------------------
+// Hover gives a quick, decoded summary. Click keeps the
+// record open and highlights its actual map location.
+// --------------------------------------------------
+function getTooltip({ object }) {
+  if (!object?.properties) return null;
+  if (selectedCollision && collisionKey(object) === collisionKey(selectedCollision)) return null;
+  const p = object.properties;
+  const rows = collisionRows(object);
   return {
-    html: `
-            <div class="tooltip-content">
-                <strong>Road Collision</strong>
-                <br>
-                <span class="tooltip-year">
-                    Year: ${p.collision_year ?? p.year ?? "N/A"}
-                </span>
-                <br>
-                Date: ${p.date ?? "N/A"}
-                <br>
-                Time: ${p.time ?? "N/A"}
-                <br>
-                Severity: ${p.collision_severity ?? "N/A"}
-                <br>
-                Casualties: ${p.number_of_casualties ?? "N/A"}
-                <br>
-                Vehicles: ${p.number_of_vehicles ?? "N/A"}
-                <br>
-                Speed limit: ${p.speed_limit ?? "N/A"} mph
-                <br>
-                Road number: ${p.first_road_number ?? "N/A"}
-                <br>
-                Road surface: ${p.road_surface_conditions ?? "N/A"}
-                <br>
-                Weather: ${p.weather_conditions ?? "N/A"}
-                <br>
-                Latitude: ${p.latitude ?? "N/A"}
-                <br>
-                Longitude: ${p.longitude ?? "N/A"}
-            </div>
-        `,
+    html: `<div class="tooltip-content">
+      <strong>${escapeHtml(p.collision_year)} · ${escapeHtml(categoryLabel("severity", p.collision_severity))} collision</strong>
+      <span class="tooltip-date">${escapeHtml(p.date)} · ${escapeHtml(p.time)}</span>
+      <dl>${rows.filter(([name]) => ["Lighting", "Weather", "Speed limit", "Vehicles", "Casualties"].includes(name))
+        .map(([name, value]) => `<div><dt>${name}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>
+      <span class="tooltip-hint">Click to inspect this collision</span>
+    </div>`,
+    style: { backgroundColor: "#fffefa", color: "#282c29", borderRadius: "9px", padding: "13px", maxWidth: "290px" },
   };
 }
+
+function renderCollisionDetails() {
+  if (!selectedCollision) return;
+  const p = selectedCollision.properties;
+  const index = selectedGroup.findIndex((feature) => collisionKey(feature) === collisionKey(selectedCollision));
+  const rows = collisionRows(selectedCollision);
+
+  detailsContent.innerHTML = `
+    <div class="detail-heading"><span class="detail-year year-${p.collision_year}">${escapeHtml(p.collision_year)}</span>
+      <strong>${escapeHtml(categoryLabel("severity", p.collision_severity))} collision</strong></div>
+    <p class="record-reference">${escapeHtml(p.collision_index)}</p>
+    ${selectedGroup.length > 1 ? `<div class="location-records">
+      <span>${selectedGroup.length} collisions at this location<br><strong>Record ${index + 1} of ${selectedGroup.length}</strong></span>
+      <button type="button" data-record-step="-1" aria-label="Previous collision at this location" ${index === 0 ? "disabled" : ""}>←</button>
+      <button type="button" data-record-step="1" aria-label="Next collision at this location" ${index === selectedGroup.length - 1 ? "disabled" : ""}>→</button>
+    </div>` : ""}
+    <dl class="detail-rows">${rows.map(([name, value]) => `<div><dt>${name}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}
+      <div><dt>Coordinates</dt><dd>${selectedCollision.geometry.coordinates.map((value) => value.toFixed(5)).join(", ")}</dd></div>
+    </dl>
+    <div class="driver-details"><h3>Drivers in this collision</h3>
+      <p class="control-hint">All involved drivers, including those outside the chosen driver filters.</p>
+      ${selectedDrivers === null ? '<p class="control-hint">Loading driver details…</p>'
+        : selectedDrivers === false ? '<p class="error-message">Could not load driver details. Close and select the collision to retry.</p>'
+        : selectedDrivers.length === 0 ? '<p class="control-hint">No linked vehicle records found.</p>'
+        : selectedDrivers.map((driver) => `<div class="driver-record"><strong>Vehicle ${escapeHtml(driver.vehicle_reference)}</strong>
+          <span>${escapeHtml(categoryLabel("driverGender", driver.sex_of_driver))} · ${escapeHtml(recordedValue(driver.age_of_driver) === "Not recorded"
+            ? categoryLabel("driverAge", driver.age_band_of_driver) : `${driver.age_of_driver} years old`)}</span></div>`).join("")}
+    </div>`;
+}
+
+async function selectCollision(feature, group = null) {
+  const request = ++detailsRequest;
+  selectedCollision = feature;
+  selectedGroup = group || displayedFeatures.filter((other) =>
+    other.geometry.coordinates[0] === feature.geometry.coordinates[0] &&
+    other.geometry.coordinates[1] === feature.geometry.coordinates[1],
+  );
+  selectedDrivers = null;
+  detailsPanel.hidden = false;
+  renderCollisionDetails();
+  refreshMapLayers();
+
+  try {
+    const year = feature.properties.collision_year;
+    const vehicles = await fetchGeoJson(`vehicles/calderdale_vehicles_${year}.geojson`, `Could not load vehicles for ${year}.`);
+    if (request !== detailsRequest) return;
+    selectedDrivers = vehicles.features.filter((vehicle) => vehicle.properties.collision_index === feature.properties.collision_index)
+      .map((vehicle) => vehicle.properties);
+  } catch (error) {
+    if (request !== detailsRequest) return;
+    selectedDrivers = false;
+  }
+  renderCollisionDetails();
+  scheduleLabelUpdate();
+}
+
+function clearCollisionSelection() {
+  detailsRequest++;
+  selectedCollision = null;
+  selectedGroup = [];
+  selectedDrivers = null;
+  detailsPanel.hidden = true;
+}
+
+showLabelsInput.addEventListener("change", refreshMapLayers);
+labelField.addEventListener("change", refreshMapLayers);
+document.getElementById("close-details").addEventListener("click", () => {
+  clearCollisionSelection();
+  refreshMapLayers();
+});
+detailsContent.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-record-step]");
+  if (!button || button.disabled) return;
+  const index = selectedGroup.findIndex((feature) => collisionKey(feature) === collisionKey(selectedCollision));
+  selectCollision(selectedGroup[index + Number(button.dataset.recordStep)], selectedGroup);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && selectedCollision) {
+    clearCollisionSelection();
+    refreshMapLayers();
+  }
+});
 
 // --------------------------------------------------
 // Deck instance
@@ -348,6 +564,17 @@ const deck = new Deck({
   controller: true,
   layers: [mapLayer],
   getTooltip,
+  onViewStateChange: scheduleLabelUpdate,
+  onClick: (info) => {
+    // Pick at the click position even if no hover event came first.
+    const object = info.object || deck.pickObject({ x: info.x, y: info.y, radius: 2 })?.object;
+    if (object?.properties) {
+      selectCollision(object);
+    } else {
+      clearCollisionSelection();
+      refreshMapLayers();
+    }
+  },
 });
 
 // Keep the overview limit suitable for the window size.
@@ -368,6 +595,7 @@ window.addEventListener("resize", () => {
           zoom: Math.max(current.zoom, overview.minZoom),
         },
   });
+  scheduleLabelUpdate();
 });
 
 // --------------------------------------------------
@@ -482,14 +710,15 @@ async function showSelectedYears(selections) {
   const request = ++displayRequest;
 
   if (selections.length === 0) {
-    deck.setProps({
-      layers: [mapLayer],
-    });
+    displayedYears = [];
+    displayedFeatures = [];
+    clearCollisionSelection();
+    refreshMapLayers();
 
     info.innerHTML = `
             <span class="result-number">—</span>
             <div class="result-description">
-                <strong>Collisions on the map</strong>
+                <strong>Matching collisions</strong>
                 <span>Select years to begin</span>
             </div>
         `;
@@ -532,19 +761,16 @@ async function showSelectedYears(selections) {
       return;
     }
 
-    // Points first, text labels on top of all points.
-    const pointLayers = results.map((r) => r.pointLayer);
-    const textLayers = results.flatMap((r) => r.textLayers);
-    const total = results.reduce((sum, r) => sum + r.count, 0);
-
-    deck.setProps({
-      layers: [mapLayer, ...pointLayers, ...textLayers],
-    });
+    displayedYears = results;
+    displayedFeatures = results.flatMap((result) => result.features);
+    clearCollisionSelection();
+    refreshMapLayers();
+    const total = displayedFeatures.length;
 
     info.innerHTML = `
             <span class="result-number">${total.toLocaleString("en-GB")}</span>
             <div class="result-description">
-                <strong>${total === 1 ? "Collision on the map" : "Collisions on the map"}</strong>
+                <strong>${total === 1 ? "Matching collision" : "Matching collisions"}</strong>
                 <span>${total === 0 ? "No matches for this selection" : years.join(", ")}</span>
             </div>
         `;
@@ -781,17 +1007,20 @@ clearButton.addEventListener("click", () => {
   updateFilterSummaries();
   updateSelectedYearsText();
 
-  // Remove all collision and label layers, keeping only the basemap
-  deck.setProps({
-    layers: [mapLayer],
-  });
+  // Clear the displayed records, labels and selected collision.
+  displayedYears = [];
+  displayedFeatures = [];
+  clearCollisionSelection();
+  showLabelsInput.checked = false;
+  labelField.value = "severity";
+  refreshMapLayers();
 
   const info = document.getElementById("info");
   info.setAttribute("aria-busy", "false");
   info.innerHTML = `
         <span class="result-number">—</span>
         <div class="result-description">
-            <strong>Collisions on the map</strong>
+            <strong>Matching collisions</strong>
             <span>Select years to begin</span>
         </div>
     `;
