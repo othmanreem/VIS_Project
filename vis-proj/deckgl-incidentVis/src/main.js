@@ -2,6 +2,7 @@ import { Deck, WebMercatorViewport } from "@deck.gl/core";
 import { BitmapLayer, GeoJsonLayer, TextLayer } from "@deck.gl/layers";
 import { TileLayer } from "@deck.gl/geo-layers";
 import { CATEGORIES } from "./codes.js";
+import { DETAIL_CODES } from "./detailCodes.js";
 import "./style.css";
 
 // --------------------------------------------------
@@ -27,7 +28,7 @@ function getOverviewViewState() {
       padding: {
         top: padding,
         bottom: padding,
-        left: Math.min(sidebar.offsetWidth + 60, width * 0.4),
+        left: sidebar.hidden ? padding : Math.min(sidebar.offsetWidth + 60, width * 0.4),
         right: padding,
       },
     },
@@ -102,7 +103,8 @@ const mapLayer = new TileLayer({
 // Data loading (cached, so re-pressing View is fast)
 // Expected files:
 // /calderdale_collisions_YYYY.geojson
-// /calderdale_vehicles_YYYY.geojson   (only needed for driver filters)
+// /vehicles/calderdale_vehicles_YYYY.geojson
+// /casualties/calderdale_casualties_YYYY.geojson
 // --------------------------------------------------
 const fetchCache = new Map();
 
@@ -134,63 +136,54 @@ function loadYearData(year) {
 }
 
 // --------------------------------------------------
-// Vehicles are joined to collisions with collision_index.
-// For every collision we keep, per vehicle-based category,
-// the set of codes found among its drivers.
-// Result: Map(collision_index -> { driverGender: Set, driverAge: Set })
+// Keep whole linked records instead of separate sets of codes.
+// Combined vehicle filters must match the same vehicle;
+// combined casualty filters must match the same person.
 // --------------------------------------------------
-const vehicleIndexCache = new Map();
-const VEHICLE_CATEGORIES = CATEGORIES.filter((cat) => cat.source === "vehicle");
+const recordIndexCache = new Map();
+const LINKED_SOURCES = { vehicle: "vehicles", casualty: "casualties" };
+const FILTER_GROUPS = [
+  { source: "collision", label: "Collision conditions", hint: "Conditions recorded for the collision." },
+  { source: "vehicle", label: "Vehicles and drivers", hint: "One vehicle must match all chosen vehicle and driver conditions." },
+  { source: "casualty", label: "Casualties", hint: "One casualty must match all chosen casualty conditions. This can be a different person from the matching driver." },
+];
 
-async function loadVehicleIndex(year) {
-  if (vehicleIndexCache.has(year)) {
-    return vehicleIndexCache.get(year);
+async function loadRecordIndex(year, source) {
+  const key = `${source}:${year}`;
+  if (recordIndexCache.has(key)) {
+    return recordIndexCache.get(key);
   }
 
+  const folder = LINKED_SOURCES[source];
   const data = await fetchGeoJson(
-    `vehicles/calderdale_vehicles_${year}.geojson`,
-    `Could not load vehicle data for ${year}.`,
+    `${folder}/calderdale_${folder}_${year}.geojson`,
+    `Could not load ${folder} data for ${year}.`,
   );
 
   const index = new Map();
 
   for (const feature of data.features) {
     const props = feature.properties || {};
-    let entry = index.get(props.collision_index);
-
-    if (!entry) {
-      entry = {};
-      VEHICLE_CATEGORIES.forEach((cat) => {
-        entry[cat.key] = new Set();
-      });
-      index.set(props.collision_index, entry);
+    if (!index.has(props.collision_index)) {
+      index.set(props.collision_index, []);
     }
-
-    VEHICLE_CATEGORIES.forEach((cat) => {
-      const value = props[cat.field];
-      if (value !== undefined && value !== null) {
-        entry[cat.key].add(String(value));
-      }
-    });
+    index.get(props.collision_index).push(props);
   }
 
-  vehicleIndexCache.set(year, index);
+  recordIndexCache.set(key, index);
   return index;
 }
 
 // --------------------------------------------------
-// Codes of one collision for one category.
-// Collision-based categories have a single code.
-// Vehicle-based categories can have several (one per driver).
+// Values within one category use OR; categories use AND.
+// An empty category places no restriction on the records.
 // --------------------------------------------------
-function getCodes(category, feature, vehicleIndex) {
-  if (category.source === "collision") {
-    const value = feature.properties?.[category.field];
-    return value === undefined || value === null ? [] : [String(value)];
-  }
-
-  const entry = vehicleIndex?.get(feature.properties?.collision_index);
-  return entry ? Array.from(entry[category.key]) : [];
+function matchesCategories(record, categories, filters) {
+  return categories.every((category) => {
+    const value = record[category.field];
+    const code = value === undefined || value === null || value === "" ? "-1" : String(value);
+    return filters[category.key].has(code);
+  });
 }
 
 // code -> label lookup for each category (built once)
@@ -206,7 +199,8 @@ let displayedYears = [];
 let displayedFeatures = [];
 let selectedCollision = null;
 let selectedGroup = [];
-let selectedDrivers = null;
+let selectedRecords = { vehicle: null, casualty: null };
+let activeDetailsTab = "collision";
 let detailsRequest = 0;
 let labelFrame = 0;
 
@@ -252,12 +246,13 @@ function collisionRows(feature) {
   const surface = recordedValue(p.road_surface_conditions);
 
   return [
-    ["Severity", categoryLabel("severity", p.collision_severity)],
+    ["Collision severity", categoryLabel("severity", p.collision_severity)],
     ["Date", recordedValue(p.date)],
     ["Time", recordedValue(p.time)],
     ["Lighting", categoryLabel("lighting", p.light_conditions)],
     ["Weather", categoryLabel("weather", p.weather_conditions)],
-    ["Road class", categoryLabel("roadType", p.first_road_class)],
+    ["Road class", categoryLabel("roadClass", p.first_road_class)],
+    ["Road type", categoryLabel("roadType", p.road_type)],
     ["Road number", recordedValue(p.first_road_number)],
     ["Road surface", SURFACE_LABELS[surface] || surface],
     ["Speed limit", speed === "Not recorded" ? speed : `${speed} mph`],
@@ -270,11 +265,17 @@ function collisionRows(feature) {
 // One point layer per year. Filters change the records;
 // label visibility is controlled separately.
 // --------------------------------------------------
-function createYearLayers(year, collisions, vehicleIndex, filters) {
-  const activeCategories = CATEGORIES.filter((cat) => filters[cat.key]);
+function createYearLayers(year, collisions, indexes, filters) {
+  const groups = FILTER_GROUPS.map((group) => ({
+    ...group,
+    categories: CATEGORIES.filter((cat) => cat.source === group.source && filters[cat.key]),
+  })).filter((group) => group.categories.length > 0);
   const features = collisions.features.filter(
-    (feature) => feature.geometry && activeCategories.every((cat) =>
-      getCodes(cat, feature, vehicleIndex).some((code) => filters[cat.key].has(code)),
+    (feature) => feature.geometry && groups.every((group) =>
+      group.source === "collision"
+        ? matchesCategories(feature.properties, group.categories, filters)
+        : (indexes[group.source]?.get(feature.properties.collision_index) || [])
+          .some((record) => matchesCategories(record, group.categories, filters)),
     ),
   );
 
@@ -314,19 +315,21 @@ function createLabelLayer() {
   }
 
   if (displayedFeatures.length === 0) {
-    labelStatus.textContent = "Apply a year selection to show labels.";
+    labelStatus.textContent = displayedYears.length > 0
+      ? "No matching collisions to label. Try changing the filters."
+      : "Apply a year selection to show labels.";
     return null;
   }
 
   const viewport = deck.getViewports()[0];
   const minimumZoom = Math.max(12, deck.props.initialViewState.minZoom + 1);
   if (viewport.zoom < minimumZoom) {
-    labelStatus.textContent = "Zoom in to reveal labels. All dots remain visible.";
+    labelStatus.textContent = "Zoom in to reveal labels. Matching dots are retained.";
     return null;
   }
 
   const mapRect = document.getElementById("map").getBoundingClientRect();
-  const panels = ["sidebar", "map-display", "collision-details"]
+  const panels = ["sidebar", "show-filters", "map-display", "collision-details"]
     .map((id) => document.getElementById(id))
     .filter((panel) => !panel.hidden)
     .map((panel) => {
@@ -376,12 +379,17 @@ function createLabelLayer() {
   points.sort((a, b) => a.priority - b.priority);
 
   const category = CATEGORIES.find((cat) => cat.key === labelField.value);
+  const countField = labelField.value === "vehicleCount" ? "number_of_vehicles"
+    : labelField.value === "casualtyCount" ? "number_of_casualties" : null;
   const labels = [];
   labelContext.font = '500 12px "Segoe UI", Arial';
 
   for (const { feature, x, y, radius } of points) {
     if (panels.some((box) => x >= box.left && x <= box.right && y >= box.top && y <= box.bottom)) continue;
-    const text = categoryLabel(category.key, feature.properties[category.field]);
+    const count = countField ? recordedValue(feature.properties[countField]) : null;
+    const text = countField
+      ? `${count} ${labelField.value === "vehicleCount" ? (count === "1" ? "vehicle" : "vehicles") : (count === "1" ? "casualty" : "casualties")}`
+      : categoryLabel(category.key, feature.properties[category.field]);
     const width = Math.ceil(labelContext.measureText(text).width) + 6;
     const height = 20;
     const distance = radius + 7;
@@ -404,7 +412,7 @@ function createLabelLayer() {
 
   labelStatus.textContent = labels.length === 0
     ? "No room for labels here. Hover a dot for details."
-    : `${labels.length} labels shown · overlaps hidden, dots unchanged`;
+    : `${labels.length} ${labels.length === 1 ? "label" : "labels"} shown · ${countField ? "totals per collision, including all involved" : "overlaps hidden, dots unchanged"}`;
 
   return new TextLayer({
     id: "collision-labels",
@@ -473,11 +481,141 @@ function getTooltip({ object }) {
   };
 }
 
+// --------------------------------------------------
+// Linked records are grouped into readable summaries.
+// Less common attributes stay available under More details.
+// Shared collision IDs and GeoJSON provenance are not repeated.
+// --------------------------------------------------
+const RECORD_FIELDS = {
+  vehicle: [
+    ["vehicle_type", "Vehicle type"],
+    ["generic_make_model", "Make / model"],
+    ["vehicle_manoeuvre", "Manoeuvre"],
+    ["sex_of_driver", "Driver sex"],
+    ["age_of_driver", "Driver age"],
+    ["journey_purpose_of_driver", "Journey purpose"],
+    ["age_band_of_driver", "Driver age band"],
+    ["age_of_vehicle", "Vehicle age"],
+    ["engine_capacity_cc", "Engine capacity"],
+    ["propulsion_code", "Propulsion"],
+    ["escooter_flag", "E-scooter"],
+    ["first_point_of_impact", "First impact"],
+    ["towing_and_articulation", "Towing / articulation"],
+    ["skidding_and_overturning", "Skidding / overturning"],
+    ["hit_object_in_carriageway", "Object hit on road"],
+    ["hit_object_off_carriageway", "Object hit off road"],
+    ["junction_location", "Junction location"],
+    ["vehicle_direction_from", "Direction from"],
+    ["vehicle_direction_to", "Direction to"],
+    ["vehicle_leaving_carriageway", "Leaving the road"],
+    ["vehicle_left_hand_drive", "Left-hand drive"],
+    ["vehicle_location_restricted_lane", "Restricted lane"],
+    ["driver_distance_banding", "Driver distance band"],
+    ["driver_imd_decile", "Driver IMD decile"],
+    ["lsoa_of_driver", "Driver LSOA"],
+    ["journey_purpose_of_driver_historic", "Journey purpose (historic)"],
+    ["vehicle_manoeuvre_historic", "Manoeuvre (historic)"],
+    ["vehicle_location_restricted_lane_historic", "Restricted lane (historic)"],
+  ],
+  casualty: [
+    ["casualty_severity", "Injury severity"],
+    ["casualty_class", "Person's role"],
+    ["casualty_type", "Road user type"],
+    ["sex_of_casualty", "Sex"],
+    ["age_of_casualty", "Age"],
+    ["vehicle_reference", "Linked vehicle"],
+    ["age_band_of_casualty", "Age band"],
+    ["enhanced_casualty_severity", "Detailed severity"],
+    ["casualty_injury_based", "Severity reporting"],
+    ["car_passenger", "Car passenger"],
+    ["bus_or_coach_passenger", "Bus / coach passenger"],
+    ["pedestrian_location", "Pedestrian location"],
+    ["pedestrian_movement", "Pedestrian movement"],
+    ["pedestrian_road_maintenance_worker", "Road maintenance worker"],
+    ["casualty_distance_banding", "Distance band"],
+    ["casualty_imd_decile", "IMD decile"],
+    ["lsoa_of_casualty", "LSOA"],
+    ["casualty_adjusted_severity_serious", "Serious severity adjustment"],
+    ["casualty_adjusted_severity_slight", "Slight severity adjustment"],
+  ],
+};
+
+function recordValue(kind, field, value) {
+  const recorded = recordedValue(value);
+  if (recorded === "Not recorded") return recorded;
+  const codes = DETAIL_CODES[kind][field];
+  if (codes) return codes[recorded] || `Unknown code (${recorded})`;
+  if (["age_of_driver", "age_of_casualty", "age_of_vehicle"].includes(field)) return `${recorded} years`;
+  if (field === "engine_capacity_cc") return `${recorded} cc`;
+  if (field === "vehicle_reference") return `Vehicle ${recorded}`;
+  return recorded;
+}
+
+function renderRecordRows(kind, record, fields) {
+  return `<dl class="detail-rows">${fields.map(([field, label]) =>
+    `<div><dt>${label}</dt><dd>${escapeHtml(recordValue(kind, field, record[field]))}</dd></div>`,
+  ).join("")}</dl>`;
+}
+
+function updateDetailsTabs() {
+  const p = selectedCollision.properties;
+  detailsPanel.querySelectorAll("[data-details-tab]").forEach((button) => {
+    const kind = button.dataset.detailsTab;
+    const active = kind === activeDetailsTab;
+    const records = selectedRecords[kind];
+    const count = Array.isArray(records) ? records.length
+      : p[kind === "vehicle" ? "number_of_vehicles" : "number_of_casualties"];
+    button.textContent = kind === "collision" ? "Collision"
+      : `${kind === "vehicle" ? "Vehicles" : "Casualties"} (${recordedValue(count)})`;
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  detailsContent.setAttribute("aria-labelledby", `details-tab-${activeDetailsTab}`);
+}
+
+function renderLinkedRecords(kind) {
+  const records = selectedRecords[kind];
+  const name = kind === "vehicle" ? "vehicle" : "casualty";
+  if (records === null) return `<p class="control-hint" role="status">Loading ${name} records…</p>`;
+  if (records === false) return `<p class="error-message">Could not load ${name} records.</p>
+    <button class="retry-records" type="button" data-retry-records="${kind}">Retry loading ${name} records</button>`;
+  if (records.length === 0) return `<p class="control-hint">No linked ${name} records found in this year's data.</p>`;
+
+  const expected = selectedCollision.properties[kind === "vehicle" ? "number_of_vehicles" : "number_of_casualties"];
+  const mismatch = Number(expected) !== records.length;
+  const hint = kind === "vehicle"
+    ? "All vehicles in this collision, including drivers outside the chosen driver filters."
+    : "Each injured person is listed separately. Injury severity can differ from the overall collision severity.";
+
+  return `<p class="control-hint">${hint}</p>
+    ${mismatch ? `<p class="control-hint">${escapeHtml(expected)} reported in the collision record; ${records.length} linked records available.</p>` : ""}
+    ${records.map((record, index) => {
+      const reference = record[`${kind}_reference`];
+      const title = kind === "vehicle"
+        ? `Vehicle ${recordedValue(reference)} · ${recordValue(kind, "vehicle_type", record.vehicle_type)}`
+        : `Casualty ${recordedValue(reference)} · ${recordValue(kind, "casualty_severity", record.casualty_severity)}`;
+      const subtitle = kind === "vehicle"
+        ? `${recordValue(kind, "sex_of_driver", record.sex_of_driver)} · ${recordValue(kind, "age_of_driver", record.age_of_driver)}`
+        : `${recordValue(kind, "casualty_class", record.casualty_class)} · ${recordValue(kind, "age_of_casualty", record.age_of_casualty)}`;
+      return `<details class="linked-record" ${index === 0 ? "open" : ""}>
+        <summary><strong>${escapeHtml(title)}</strong><span>${escapeHtml(subtitle)}</span></summary>
+        ${renderRecordRows(kind, record, RECORD_FIELDS[kind].slice(0, 6))}
+        <details class="more-record-details"><summary>More ${name} details</summary>
+          ${renderRecordRows(kind, record, RECORD_FIELDS[kind].slice(6))}
+          <p class="control-hint">Not recorded means the source has no usable value. Historic fields use the earlier recording format.
+            IMD is the Index of Multiple Deprivation. LSOA is a small statistical area.
+            ${kind === "casualty" ? "Severity adjustments are statistical weights, not extra casualties or injury diagnoses." : ""}</p>
+        </details>
+      </details>`;
+    }).join("")}`;
+}
+
 function renderCollisionDetails() {
   if (!selectedCollision) return;
   const p = selectedCollision.properties;
   const index = selectedGroup.findIndex((feature) => collisionKey(feature) === collisionKey(selectedCollision));
   const rows = collisionRows(selectedCollision);
+  updateDetailsTabs();
 
   detailsContent.innerHTML = `
     <div class="detail-heading"><span class="detail-year year-${p.collision_year}">${escapeHtml(p.collision_year)}</span>
@@ -488,18 +626,28 @@ function renderCollisionDetails() {
       <button type="button" data-record-step="-1" aria-label="Previous collision at this location" ${index === 0 ? "disabled" : ""}>←</button>
       <button type="button" data-record-step="1" aria-label="Next collision at this location" ${index === selectedGroup.length - 1 ? "disabled" : ""}>→</button>
     </div>` : ""}
-    <dl class="detail-rows">${rows.map(([name, value]) => `<div><dt>${name}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}
+    ${activeDetailsTab === "collision" ? `<dl class="detail-rows">${rows.map(([name, value]) => `<div><dt>${name}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}
       <div><dt>Coordinates</dt><dd>${selectedCollision.geometry.coordinates.map((value) => value.toFixed(5)).join(", ")}</dd></div>
-    </dl>
-    <div class="driver-details"><h3>Drivers in this collision</h3>
-      <p class="control-hint">All involved drivers, including those outside the chosen driver filters.</p>
-      ${selectedDrivers === null ? '<p class="control-hint">Loading driver details…</p>'
-        : selectedDrivers === false ? '<p class="error-message">Could not load driver details. Close and select the collision to retry.</p>'
-        : selectedDrivers.length === 0 ? '<p class="control-hint">No linked vehicle records found.</p>'
-        : selectedDrivers.map((driver) => `<div class="driver-record"><strong>Vehicle ${escapeHtml(driver.vehicle_reference)}</strong>
-          <span>${escapeHtml(categoryLabel("driverGender", driver.sex_of_driver))} · ${escapeHtml(recordedValue(driver.age_of_driver) === "Not recorded"
-            ? categoryLabel("driverAge", driver.age_band_of_driver) : `${driver.age_of_driver} years old`)}</span></div>`).join("")}
-    </div>`;
+    </dl>` : renderLinkedRecords(activeDetailsTab)}`;
+}
+
+async function loadCollisionRecords(kind, feature, request) {
+  const folder = kind === "vehicle" ? "vehicles" : "casualties";
+  try {
+    const year = feature.properties.collision_year;
+    const data = await fetchGeoJson(`${folder}/calderdale_${folder}_${year}.geojson`, `Could not load ${folder} for ${year}.`);
+    if (request !== detailsRequest) return;
+    // Join within the selected year, then keep each vehicle / casualty separate.
+    selectedRecords[kind] = data.features
+      .filter((record) => record.properties.collision_index === feature.properties.collision_index)
+      .map((record) => record.properties)
+      .sort((a, b) => Number(a[`${kind}_reference`]) - Number(b[`${kind}_reference`]));
+  } catch (error) {
+    if (request !== detailsRequest) return;
+    selectedRecords[kind] = false;
+  }
+  updateDetailsTabs();
+  if (activeDetailsTab === kind) renderCollisionDetails();
 }
 
 async function selectCollision(feature, group = null) {
@@ -509,30 +657,21 @@ async function selectCollision(feature, group = null) {
     other.geometry.coordinates[0] === feature.geometry.coordinates[0] &&
     other.geometry.coordinates[1] === feature.geometry.coordinates[1],
   );
-  selectedDrivers = null;
+  selectedRecords = { vehicle: null, casualty: null };
+  if (!group) activeDetailsTab = "collision";
   detailsPanel.hidden = false;
+  detailsContent.scrollTop = 0;
   renderCollisionDetails();
   refreshMapLayers();
 
-  try {
-    const year = feature.properties.collision_year;
-    const vehicles = await fetchGeoJson(`vehicles/calderdale_vehicles_${year}.geojson`, `Could not load vehicles for ${year}.`);
-    if (request !== detailsRequest) return;
-    selectedDrivers = vehicles.features.filter((vehicle) => vehicle.properties.collision_index === feature.properties.collision_index)
-      .map((vehicle) => vehicle.properties);
-  } catch (error) {
-    if (request !== detailsRequest) return;
-    selectedDrivers = false;
-  }
-  renderCollisionDetails();
-  scheduleLabelUpdate();
+  await Promise.all(["vehicle", "casualty"].map((kind) => loadCollisionRecords(kind, feature, request)));
 }
 
 function clearCollisionSelection() {
   detailsRequest++;
   selectedCollision = null;
   selectedGroup = [];
-  selectedDrivers = null;
+  selectedRecords = { vehicle: null, casualty: null };
   detailsPanel.hidden = true;
 }
 
@@ -542,7 +681,35 @@ document.getElementById("close-details").addEventListener("click", () => {
   clearCollisionSelection();
   refreshMapLayers();
 });
+const detailsTabs = detailsPanel.querySelector(".details-tabs");
+function activateDetailsTab(button) {
+  activeDetailsTab = button.dataset.detailsTab;
+  renderCollisionDetails();
+  detailsContent.scrollTop = 0;
+}
+detailsTabs.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-details-tab]");
+  if (button) activateDetailsTab(button);
+});
+detailsTabs.addEventListener("keydown", (event) => {
+  const buttons = Array.from(detailsTabs.querySelectorAll("[data-details-tab]"));
+  const index = buttons.indexOf(document.activeElement);
+  if (index < 0 || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+    : (index + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) % buttons.length;
+  activateDetailsTab(buttons[next]);
+  buttons[next].focus();
+});
 detailsContent.addEventListener("click", (event) => {
+  const retry = event.target.closest("[data-retry-records]");
+  if (retry) {
+    const kind = retry.dataset.retryRecords;
+    selectedRecords[kind] = null;
+    renderCollisionDetails();
+    loadCollisionRecords(kind, selectedCollision, detailsRequest);
+    return;
+  }
   const button = event.target.closest("[data-record-step]");
   if (!button || button.disabled) return;
   const index = selectedGroup.findIndex((feature) => collisionKey(feature) === collisionKey(selectedCollision));
@@ -579,7 +746,7 @@ const deck = new Deck({
 
 // Keep the overview limit suitable for the window size.
 // Preserve a closer view when the user has zoomed in.
-window.addEventListener("resize", () => {
+function updateOverviewView() {
   const overview = getOverviewViewState();
   const current = deck.getViewports()[0];
   const wasOverview =
@@ -596,7 +763,27 @@ window.addEventListener("resize", () => {
         },
   });
   scheduleLabelUpdate();
-});
+}
+
+window.addEventListener("resize", updateOverviewView);
+
+// Hiding the panel keeps its controls and scroll position intact.
+// Refit only an overview; preserve a closer location when possible.
+const sidebar = document.getElementById("sidebar");
+const showFiltersButton = document.getElementById("show-filters");
+const hideFiltersButton = document.getElementById("hide-filters");
+const collapsedFilterCount = document.getElementById("collapsed-filter-count");
+
+function setFiltersCollapsed(collapsed) {
+  sidebar.hidden = collapsed;
+  showFiltersButton.hidden = !collapsed;
+  showFiltersButton.setAttribute("aria-expanded", String(!collapsed));
+  updateOverviewView();
+  (collapsed ? showFiltersButton : hideFiltersButton).focus();
+}
+
+hideFiltersButton.addEventListener("click", () => setFiltersCollapsed(true));
+showFiltersButton.addEventListener("click", () => setFiltersCollapsed(false));
 
 // --------------------------------------------------
 // Build the year rows + filter sub-menus
@@ -629,8 +816,12 @@ function buildYearMenu() {
                     <h2>Filters for ${year}</h2>
                     <span class="filter-count">No filters</span>
                 </div>
-                <p class="control-hint">Filters  will apply to year ${year} only.</p>
-                ${CATEGORIES.map(
+                <p class="control-hint">Filters apply to year ${year} only. Choose any values within a category; chosen categories must all match.</p>
+                ${FILTER_GROUPS.map((group) => `
+                <section class="filter-group" aria-labelledby="group-${year}-${group.source}">
+                    <h3 id="group-${year}-${group.source}">${group.label}</h3>
+                    <p class="control-hint">${group.hint}</p>
+                ${CATEGORIES.filter((cat) => cat.source === group.source).map(
                   (cat) => `
                     <div class="category" data-cat="${cat.key}">
                         <div class="category-row">
@@ -665,6 +856,7 @@ function buildYearMenu() {
                     </div>
                 `,
                 ).join("")}
+                </section>`).join("")}
             </div>
         </div>
     `,
@@ -743,16 +935,15 @@ async function showSelectedYears(selections) {
   try {
     const results = await Promise.all(
       selections.map(async ({ year, filters }) => {
-        const needsVehicles = VEHICLE_CATEGORIES.some(
-          (cat) => filters[cat.key],
+        const sources = Object.keys(LINKED_SOURCES).filter((source) =>
+          CATEGORIES.some((cat) => cat.source === source && filters[cat.key]),
         );
-
-        const [collisions, vehicleIndex] = await Promise.all([
+        const [collisions, entries] = await Promise.all([
           loadYearData(year),
-          needsVehicles ? loadVehicleIndex(year) : Promise.resolve(null),
+          Promise.all(sources.map(async (source) => [source, await loadRecordIndex(year, source)])),
         ]);
 
-        return createYearLayers(year, collisions, vehicleIndex, filters);
+        return createYearLayers(year, collisions, Object.fromEntries(entries), filters);
       }),
     );
 
@@ -813,7 +1004,13 @@ function getSelectionSignature(selections = getSelections()) {
 }
 
 function updateFilterStatus() {
+  const selections = getSelections();
   const hasChanges = getSelectionSignature() !== appliedSelection;
+  const count = selections.reduce((total, selection) => total + Object.keys(selection.filters).length, 0);
+  collapsedFilterCount.textContent = count;
+  collapsedFilterCount.hidden = count === 0;
+  showFiltersButton.setAttribute("aria-label", `Show filters${count ? `, ${count} selected filter ${count === 1 ? "category" : "categories"}` : ""}${hasChanges ? ", changes not applied" : ""}`);
+  showFiltersButton.classList.toggle("has-changes", hasChanges);
   filterStatus.classList.toggle("has-changes", hasChanges && !isApplying);
 
   if (isApplying) {

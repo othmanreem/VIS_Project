@@ -81,6 +81,66 @@ button:focus-visible, input:focus-visible, .year-option:has(input:focus-visible)
     padding: 16px 22px;
     flex-shrink: 0;
 }
+.sidebar-header > div {
+    min-width: 0;
+    flex: 1;
+}
+#hide-filters {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 32px;
+    flex-shrink: 0;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--muted);
+}
+#hide-filters:hover {
+    background: var(--surface);
+    color: var(--text);
+}
+#hide-filters svg, #show-filters svg {
+    width: 16px;
+    height: 16px;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+#show-filters {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-height: 42px;
+    padding: 0 13px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: var(--paper);
+    color: var(--text);
+    box-shadow: 0 3px 14px rgba(48, 55, 41, 0.10);
+    font-size: 12px;
+    font-weight: 600;
+}
+#show-filters:hover {
+    background: var(--surface);
+}
+#show-filters.has-changes {
+    border-color: var(--accent);
+}
+#collapsed-filter-count {
+    min-width: 20px;
+    padding: 2px 5px;
+    border-radius: 5px;
+    color: var(--accent);
+    background: var(--accent-light);
+    text-align: center;
+    font-size: 10px;
+}
 
 .app-mark {
     display: grid;
@@ -353,6 +413,19 @@ h2 {
     font-size: 11px;
     font-variant-numeric: tabular-nums;
 }
+.filter-group {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+}
+.filter-group h3 {
+    margin: 0 0 5px;
+    font-size: 12px;
+    font-weight: 600;
+}
+.filter-group > .control-hint {
+    margin-bottom: 8px;
+}
 .category {
     border-bottom: 1px solid var(--border);
 }
@@ -624,6 +697,8 @@ h2 {
 }
 #collision-details {
     top: 20px;
+    width: 352px;
+    max-width: calc(100vw - 40px);
     max-height: calc(100dvh - 150px);
     display: flex;
     flex-direction: column;
@@ -702,27 +777,79 @@ h2 {
     margin: 0;
     overflow-wrap: anywhere;
 }
-.driver-details {
-    margin-top: 20px;
-}
-.driver-details h3 {
-    margin: 0 0 6px;
-    font-size: 12px;
-    font-weight: 600;
-}
-.driver-record {
+.details-tabs {
     display: flex;
-    flex-direction: column;
-    gap: 3px;
-    font-size: 12px;
-    padding: 10px 0;
+    gap: 4px;
+    padding: 8px 12px;
+    flex-shrink: 0;
     border-bottom: 1px solid var(--border);
 }
-.driver-record strong {
+.details-tabs button {
+    flex: 1;
+    min-height: 34px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.details-tabs button:hover {
+    background: var(--surface);
+    color: var(--text);
+}
+.details-tabs button[aria-selected="true"] {
+    background: var(--accent-light);
+    color: var(--accent);
+}
+.linked-record {
+    margin-top: 12px;
+    padding: 0 12px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+.linked-record > summary {
+    padding: 12px 0 0;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1.5;
+}
+.linked-record > summary strong {
     font-weight: 600;
 }
-.driver-record span {
+.linked-record > summary span {
+    display: block;
     color: var(--muted);
+    margin: 4px 0 0 14px;
+    font-size: 11px;
+}
+.linked-record[open] > summary {
+    padding-bottom: 10px;
+}
+.linked-record .detail-rows > div {
+    grid-template-columns: 100px 1fr;
+    font-size: 11px;
+}
+.more-record-details > summary {
+    margin-top: 12px;
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.linked-record summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 3px;
+}
+.retry-records {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--accent);
+    padding: 9px 12px;
+    font-size: 12px;
 }
 .location-records {
     display: flex;
@@ -777,6 +904,10 @@ h2 {
 }
 
 @media (max-width: 600px) {
+    #show-filters {
+        top: 12px;
+        left: 12px;
+    }
     #sidebar {
         top: 12px;
         left: 12px;

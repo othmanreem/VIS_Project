@@ -10,6 +10,14 @@
     <div id="app">
         <div id="map"></div>
 
+        <button id="show-filters" type="button" aria-controls="sidebar" aria-expanded="false" hidden>
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M3 2v12M8 2v12M13 2v12M1 6h4M6 10h4M11 5h4"/>
+            </svg>
+            <span>Filters</span>
+            <span id="collapsed-filter-count" hidden></span>
+        </button>
+
         <aside id="sidebar" aria-label="Collision filters">
             <div class="sidebar-header">
                 <span class="app-mark" aria-hidden="true">
@@ -24,6 +32,9 @@
                     <h1>IncidentVis<span class="title-dot">.</span></h1>
                     <p>Calderdale <span aria-hidden="true">/</span> 2020–2025</p>
                 </div>
+                <button id="hide-filters" type="button" aria-label="Hide filters" aria-controls="sidebar" title="Hide filters">
+                    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 3L5 8l5 5"/></svg>
+                </button>
             </div>
 
             <div id="info" role="status" aria-live="polite">
@@ -62,7 +73,12 @@
                 <h2 id="details-title">Collision details</h2>
                 <button id="close-details" type="button" aria-label="Close collision details">×</button>
             </div>
-            <div id="details-content"></div>
+            <div class="details-tabs" role="tablist" aria-label="Collision information">
+                <button id="details-tab-collision" type="button" role="tab" data-details-tab="collision" aria-selected="true" aria-controls="details-content">Collision</button>
+                <button id="details-tab-vehicle" type="button" role="tab" data-details-tab="vehicle" aria-selected="false" aria-controls="details-content" tabindex="-1">Vehicles</button>
+                <button id="details-tab-casualty" type="button" role="tab" data-details-tab="casualty" aria-selected="false" aria-controls="details-content" tabindex="-1">Casualties</button>
+            </div>
+            <div id="details-content" role="tabpanel" aria-labelledby="details-tab-collision" tabindex="0"></div>
         </section>
 
         <div id="map-display" role="group" aria-label="Map labels">
@@ -73,10 +89,12 @@
                     <span>Labels</span>
                 </label>
                 <select id="label-field" aria-label="Label attribute" disabled>
-                    <option value="severity">Severity</option>
+                    <option value="severity">Collision severity</option>
                     <option value="weather">Weather</option>
                     <option value="lighting">Lighting</option>
-                    <option value="roadType">Road class</option>
+                    <option value="roadClass">Road class</option>
+                    <option value="vehicleCount">Vehicle count</option>
+                    <option value="casualtyCount">Casualty count</option>
                 </select>
             </div>
             <p id="label-status" aria-live="polite">Hover for details. Click to keep them open.</p>
