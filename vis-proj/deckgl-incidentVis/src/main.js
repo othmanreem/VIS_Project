@@ -7,8 +7,9 @@ import "./style.css";
 
 // --------------------------------------------------
 // Bounds of all 2,016 collision locations (2020-2025).
-// Fit the overview to the map size, leaving space for
-// the sidebar and some surrounding area.
+// Fit the overview to the map pane, leaving some
+// surrounding area. The pane sits beside the filters and
+// above the charts, so no space needs reserving for them.
 // --------------------------------------------------
 const COLLISION_BOUNDS = [
   [-2.17014, 53.625085],
@@ -17,21 +18,13 @@ const COLLISION_BOUNDS = [
 
 function getOverviewViewState() {
   const map = document.getElementById("map");
-  const sidebar = document.getElementById("sidebar");
   const width = map.clientWidth;
   const height = map.clientHeight;
-  const padding = Math.min(80, width * 0.08, height * 0.12);
+  const padding = Math.min(64, width * 0.08, height * 0.12);
 
   const overview = new WebMercatorViewport({ width, height }).fitBounds(
     COLLISION_BOUNDS,
-    {
-      padding: {
-        top: padding,
-        bottom: padding,
-        left: sidebar.hidden ? padding : Math.min(sidebar.offsetWidth + 60, width * 0.4),
-        right: padding,
-      },
-    },
+    { padding },
   );
 
   const zoom = overview.zoom - 0.3;
@@ -197,6 +190,10 @@ CATEGORIES.forEach((cat) => {
 // --------------------------------------------------
 let displayedYears = [];
 let displayedFeatures = [];
+// Features that pass the chart selections are drawn on the map.
+let mapFeatures = [];
+let pointLayers = [];
+let hoverFeature = null;
 let selectedCollision = null;
 let selectedGroup = [];
 let selectedRecords = { vehicle: null, casualty: null };
@@ -262,10 +259,11 @@ function collisionRows(feature) {
 }
 
 // --------------------------------------------------
-// One point layer per year. Filters change the records;
-// label visibility is controlled separately.
+// Sidebar filters decide which records are loaded for each
+// year; chart selections then narrow what the map draws.
+// Label visibility is controlled separately.
 // --------------------------------------------------
-function createYearLayers(year, collisions, indexes, filters) {
+function filterYearFeatures(year, collisions, indexes, filters) {
   const groups = FILTER_GROUPS.map((group) => ({
     ...group,
     categories: CATEGORIES.filter((cat) => cat.source === group.source && filters[cat.key]),
@@ -279,6 +277,10 @@ function createYearLayers(year, collisions, indexes, filters) {
     ),
   );
 
+  return { year, features };
+}
+
+function createPointLayer(year, features) {
   const pointLayer = new GeoJsonLayer({
     id: `collisions-${year}`,
     data: { type: "FeatureCollection", features },
@@ -297,7 +299,17 @@ function createYearLayers(year, collisions, indexes, filters) {
     updateTriggers: { getFillColor: [year] },
   });
 
-  return { pointLayer, features };
+  return pointLayer;
+}
+
+function rebuildPointLayers() {
+  const byYear = new Map();
+  mapFeatures.forEach((feature) => {
+    const year = String(feature.properties.collision_year);
+    if (!byYear.has(year)) byYear.set(year, []);
+    byYear.get(year).push(feature);
+  });
+  pointLayers = displayedYears.map(({ year }) => createPointLayer(year, byYear.get(year) || []));
 }
 
 // --------------------------------------------------
@@ -314,7 +326,7 @@ function createLabelLayer() {
     return null;
   }
 
-  if (displayedFeatures.length === 0) {
+  if (mapFeatures.length === 0) {
     labelStatus.textContent = displayedYears.length > 0
       ? "No matching collisions to label. Try changing the filters."
       : "Apply a year selection to show labels.";
@@ -329,7 +341,7 @@ function createLabelLayer() {
   }
 
   const mapRect = document.getElementById("map").getBoundingClientRect();
-  const panels = ["sidebar", "show-filters", "map-display", "collision-details"]
+  const panels = ["show-filters", "map-display", "collision-details"]
     .map((id) => document.getElementById(id))
     .filter((panel) => !panel.hidden)
     .map((panel) => {
@@ -362,7 +374,7 @@ function createLabelLayer() {
   }
 
   panels.forEach(reserve);
-  const points = displayedFeatures.map((feature) => {
+  const points = mapFeatures.map((feature) => {
     const [x, y] = viewport.project(feature.geometry.coordinates);
     const radius = Math.max(4, Math.min(12, 45 * viewport.distanceScales.unitsPerMeter[0] * viewport.scale));
     const key = collisionKey(feature);
@@ -434,7 +446,7 @@ function createLabelLayer() {
 }
 
 function refreshMapLayers() {
-  const layers = [mapLayer, ...displayedYears.map((result) => result.pointLayer)];
+  const layers = [mapLayer, ...pointLayers];
 
   if (selectedCollision) {
     layers.push(new GeoJsonLayer({
@@ -653,7 +665,7 @@ async function loadCollisionRecords(kind, feature, request) {
 async function selectCollision(feature, group = null) {
   const request = ++detailsRequest;
   selectedCollision = feature;
-  selectedGroup = group || displayedFeatures.filter((other) =>
+  selectedGroup = group || mapFeatures.filter((other) =>
     other.geometry.coordinates[0] === feature.geometry.coordinates[0] &&
     other.geometry.coordinates[1] === feature.geometry.coordinates[1],
   );
@@ -663,6 +675,7 @@ async function selectCollision(feature, group = null) {
   detailsContent.scrollTop = 0;
   renderCollisionDetails();
   refreshMapLayers();
+  updateLinked();
 
   await Promise.all(["vehicle", "casualty"].map((kind) => loadCollisionRecords(kind, feature, request)));
 }
@@ -673,6 +686,7 @@ function clearCollisionSelection() {
   selectedGroup = [];
   selectedRecords = { vehicle: null, casualty: null };
   detailsPanel.hidden = true;
+  updateLinked();
 }
 
 showLabelsInput.addEventListener("change", refreshMapLayers);
@@ -723,6 +737,328 @@ document.addEventListener("keydown", (event) => {
 });
 
 // --------------------------------------------------
+// Coordinated analytical views
+// The charts sit beside the map, not on top of it, and are
+// linked to it in three ways:
+//  1. Selecting bars filters the map's points and the other charts.
+//  2. The charts can follow the map's visible area (pan / zoom).
+//  3. Hovering or selecting a point marks its bars in every chart.
+// Each chart's own bars ignore that chart's selection, so the
+// remaining options stay visible and can be added or removed.
+// --------------------------------------------------
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTH_LONG = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const CONDITION_ATTRIBUTES = [
+  ["weather", "Weather"],
+  ["lighting", "Lighting"],
+  ["roadClass", "Road class"],
+  ["roadType", "Road type"],
+];
+
+let conditionKey = "weather";
+let analyticsFrame = 0;
+let lastBoundsKey = "";
+const derivedCache = new WeakMap();
+const chartSelections = { year: new Set(), severity: new Set(), hour: new Set(), month: new Set(), conditions: new Set() };
+
+const chartGrid = document.getElementById("chart-grid");
+const analyticsStatus = document.getElementById("analytics-status");
+const followMapInput = document.getElementById("follow-map");
+const clearChartsButton = document.getElementById("clear-chart-filters");
+
+function codeKey(value) {
+  return value === undefined || value === null || value === "" ? "-1" : String(value);
+}
+
+function conditionCategory() {
+  return CATEGORIES.find((cat) => cat.key === conditionKey);
+}
+
+// Hour and month are read once per collision from the stored time and date.
+function derived(feature) {
+  let values = derivedCache.get(feature);
+  if (!values) {
+    const p = feature.properties;
+    const time = String(p.time ?? "").match(/^(\d{1,2})\s*:/);
+    const date = String(p.date ?? "");
+    const dayFirst = date.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    const yearFirst = date.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    const month = dayFirst ? Number(dayFirst[2]) - 1
+      : yearFirst ? Number(yearFirst[2]) - 1
+      : (Number.isNaN(Date.parse(date)) ? null : new Date(date).getMonth());
+    const hour = time ? Number(time[1]) : null;
+    values = {
+      hour: hour !== null && hour >= 0 && hour <= 23 ? hour : null,
+      month: month !== null && month >= 0 && month <= 11 ? month : null,
+    };
+    derivedCache.set(feature, values);
+  }
+  return values;
+}
+
+function dynamicBins(keyOf, labelOf, order) {
+  const totals = new Map();
+  displayedFeatures.forEach((feature) => {
+    const key = keyOf(feature);
+    totals.set(key, (totals.get(key) || 0) + 1);
+  });
+  const keys = Array.from(totals.keys()).sort(order === "count"
+    ? (a, b) => totals.get(b) - totals.get(a)
+    : (a, b) => Number(a) - Number(b));
+  return keys.map((key) => ({ key, label: labelOf(key) }));
+}
+
+const CHARTS = [
+  {
+    id: "year", title: "Year", kind: "column",
+    keyOf: (f) => String(f.properties.collision_year),
+    bins: () => YEARS.filter((year) => displayedYears.some((result) => result.year === year))
+      .map((year) => ({ key: year, label: year, color: `rgb(${YEAR_COLORS[year].slice(0, 3).join(",")})` })),
+  },
+  {
+    id: "severity", title: "Severity", kind: "row",
+    keyOf: (f) => codeKey(f.properties.collision_severity),
+    bins: () => dynamicBins((f) => codeKey(f.properties.collision_severity), (key) => categoryLabel("severity", key), "code"),
+  },
+  {
+    id: "hour", title: "Time of day", kind: "column",
+    keyOf: (f) => String(derived(f).hour ?? "?"),
+    bins: () => Array.from({ length: 24 }, (_, hour) => ({
+      key: String(hour),
+      label: `${String(hour).padStart(2, "0")}:00 to ${String(hour).padStart(2, "0")}:59`,
+      axis: hour % 3 === 0 ? String(hour) : "",
+    })),
+  },
+  {
+    id: "month", title: "Month", kind: "column",
+    keyOf: (f) => String(derived(f).month ?? "?"),
+    bins: () => MONTH_NAMES.map((name, month) => ({ key: String(month), label: MONTH_LONG[month], axis: name })),
+  },
+  {
+    id: "conditions", title: "Conditions", kind: "row",
+    keyOf: (f) => codeKey(f.properties[conditionCategory().field]),
+    bins: () => dynamicBins(
+      (f) => codeKey(f.properties[conditionCategory().field]),
+      (key) => categoryLabel(conditionKey, key),
+      "count",
+    ),
+  },
+];
+
+function buildAnalytics() {
+  chartGrid.innerHTML = CHARTS.map((chart) => `
+    <article class="chart-card chart-${chart.id}">
+      <header class="chart-head">
+        <h3>${chart.title}</h3>
+        ${chart.id === "conditions" ? `<select id="condition-field" aria-label="Condition shown in chart">
+          ${CONDITION_ATTRIBUTES.map(([key, label]) => `<option value="${key}">${label}</option>`).join("")}
+        </select>` : ""}
+        <button type="button" class="text-button" data-clear-chart="${chart.id}" hidden>Clear</button>
+      </header>
+      <div class="chart-body" data-chart-body="${chart.id}"></div>
+    </article>`).join("");
+}
+
+function passesChartFilters(feature, excludeId = null) {
+  return CHARTS.every((chart) =>
+    chart.id === excludeId || chartSelections[chart.id].size === 0 || chartSelections[chart.id].has(chart.keyOf(feature)));
+}
+
+function currentBounds() {
+  const viewport = deck.getViewports()[0];
+  return viewport ? viewport.getBounds() : null;
+}
+
+function inBounds(feature, bounds) {
+  const [x, y] = feature.geometry.coordinates;
+  return x >= bounds[0] && x <= bounds[2] && y >= bounds[1] && y <= bounds[3];
+}
+
+function countLabel(count) {
+  return `${count.toLocaleString("en-GB")} ${count === 1 ? "collision" : "collisions"}`;
+}
+
+function renderColumns(chart, bins, counts, max) {
+  const selected = chartSelections[chart.id];
+  const showValues = bins.length <= 12;
+  return `<div class="column-chart${selected.size ? " has-selection" : ""}" role="group" aria-label="${escapeHtml(chart.title)}">
+    ${bins.map((bin) => {
+      const count = counts.get(bin.key) || 0;
+      const height = (count / max) * 100;
+      const text = `${bin.label}: ${countLabel(count)}`;
+      return `<button type="button" class="bar bar-col" data-chart="${chart.id}" data-key="${bin.key}"
+          aria-pressed="${selected.has(bin.key)}" aria-label="${escapeHtml(text)}" title="${escapeHtml(text)}"
+          style="--h:${height.toFixed(1)}%${bin.color ? `;--bar:${bin.color}` : ""}">
+        <span class="bar-track"><span class="bar-fill"></span>${showValues ? `<span class="bar-value">${count}</span>` : ""}</span>
+        <span class="bar-axis">${escapeHtml(bin.axis ?? bin.label)}</span>
+      </button>`;
+    }).join("")}
+  </div>`;
+}
+
+function renderRows(chart, bins, counts, max) {
+  const selected = chartSelections[chart.id];
+  return `<ul class="row-chart${selected.size ? " has-selection" : ""}" aria-label="${escapeHtml(chart.title)}">
+    ${bins.map((bin) => {
+      const count = counts.get(bin.key) || 0;
+      const text = `${bin.label}: ${countLabel(count)}`;
+      return `<li><button type="button" class="bar bar-row" data-chart="${chart.id}" data-key="${bin.key}"
+          aria-pressed="${selected.has(bin.key)}" aria-label="${escapeHtml(text)}" title="${escapeHtml(text)}"
+          style="--w:${((count / max) * 100).toFixed(1)}%">
+        <span class="row-label">${escapeHtml(bin.label)}</span>
+        <span class="row-track"><span class="row-fill"></span></span>
+        <span class="row-count">${count.toLocaleString("en-GB")}</span>
+      </button></li>`;
+    }).join("")}
+  </ul>`;
+}
+
+function renderAnalytics() {
+  const hasData = displayedFeatures.length > 0;
+  const bounds = hasData && followMapInput.checked ? currentBounds() : null;
+  lastBoundsKey = bounds ? bounds.map((value) => value.toFixed(5)).join() : "";
+  const inView = (feature) => !bounds || inBounds(feature, bounds);
+
+  CHARTS.forEach((chart) => {
+    const body = chartGrid.querySelector(`[data-chart-body="${chart.id}"]`);
+    chartGrid.querySelector(`[data-clear-chart="${chart.id}"]`).hidden = chartSelections[chart.id].size === 0;
+
+    if (!hasData) {
+      body.innerHTML = `<p class="chart-empty">${displayedYears.length > 0 ? "No collisions to chart." : "Apply a year selection to see this chart."}</p>`;
+      return;
+    }
+
+    const counts = new Map();
+    displayedFeatures.forEach((feature) => {
+      if (inView(feature) && passesChartFilters(feature, chart.id)) {
+        const key = chart.keyOf(feature);
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+    });
+    const bins = chart.bins();
+    const max = Math.max(1, ...bins.map((bin) => counts.get(bin.key) || 0));
+    body.innerHTML = chart.kind === "column"
+      ? renderColumns(chart, bins, counts, max)
+      : renderRows(chart, bins, counts, max);
+  });
+
+  const activeCharts = Object.values(chartSelections).filter((set) => set.size > 0).length;
+  clearChartsButton.hidden = activeCharts === 0;
+
+  if (!hasData) {
+    analyticsStatus.textContent = displayedYears.length > 0 ? "No collisions match these filters" : "Apply filters to populate the charts";
+  } else {
+    const shown = displayedFeatures.filter((feature) => inView(feature) && passesChartFilters(feature)).length;
+    analyticsStatus.textContent = `${countLabel(shown)}${bounds ? " in the map view" : ""}`
+      + (activeCharts ? ` · ${activeCharts} chart ${activeCharts === 1 ? "filter" : "filters"} active` : "");
+  }
+  updateLinked();
+}
+
+// A hovered or selected collision is marked in every chart.
+function updateLinked() {
+  chartGrid.querySelectorAll(".is-linked").forEach((element) => element.classList.remove("is-linked"));
+  const feature = hoverFeature || selectedCollision;
+  if (!feature) return;
+  CHARTS.forEach((chart) => {
+    chartGrid.querySelector(`.bar[data-chart="${chart.id}"][data-key="${chart.keyOf(feature)}"]`)?.classList.add("is-linked");
+  });
+}
+
+function scheduleAnalyticsUpdate() {
+  if (!followMapInput.checked || displayedFeatures.length === 0 || analyticsFrame) return;
+  analyticsFrame = requestAnimationFrame(() => {
+    analyticsFrame = 0;
+    const bounds = currentBounds();
+    const key = bounds ? bounds.map((value) => value.toFixed(5)).join() : "";
+    if (key !== lastBoundsKey) renderAnalytics();
+  });
+}
+
+function resetChartSelections() {
+  Object.values(chartSelections).forEach((set) => set.clear());
+}
+
+function clearDisplayedData() {
+  displayedYears = [];
+  displayedFeatures = [];
+  mapFeatures = [];
+  pointLayers = [];
+  hoverFeature = null;
+  resetChartSelections();
+}
+
+// Chart selections narrow the points on the map and the other charts.
+function applyChartFilters() {
+  mapFeatures = displayedFeatures.filter((feature) => passesChartFilters(feature));
+  rebuildPointLayers();
+  if (selectedCollision && !mapFeatures.includes(selectedCollision)) {
+    clearCollisionSelection();
+  }
+  refreshMapLayers();
+  updateInfo();
+  renderAnalytics();
+}
+
+function updateInfo() {
+  const info = document.getElementById("info");
+  if (displayedYears.length === 0) {
+    info.innerHTML = `
+        <span class="result-number">—</span>
+        <div class="result-description">
+            <strong>Matching collisions</strong>
+            <span>Select years to begin</span>
+        </div>`;
+    return;
+  }
+  const total = mapFeatures.length;
+  const available = displayedFeatures.length;
+  const years = displayedYears.map((result) => result.year).join(", ");
+  info.innerHTML = `
+        <span class="result-number">${total.toLocaleString("en-GB")}</span>
+        <div class="result-description">
+            <strong>${total === 1 ? "Matching collision" : "Matching collisions"}</strong>
+            <span>${available === 0 ? "No matches for this selection"
+              : total === available ? years
+              : `${total.toLocaleString("en-GB")} of ${available.toLocaleString("en-GB")} after chart filters · ${years}`}</span>
+        </div>`;
+}
+
+chartGrid.addEventListener("click", (event) => {
+  const clear = event.target.closest("[data-clear-chart]");
+  if (clear) {
+    chartSelections[clear.dataset.clearChart].clear();
+    applyChartFilters();
+    return;
+  }
+  const bar = event.target.closest(".bar");
+  if (!bar) return;
+  const { chart, key } = bar.dataset;
+  const selected = chartSelections[chart];
+  if (selected.has(key)) selected.delete(key); else selected.add(key);
+  applyChartFilters();
+  // The chart is redrawn, so return keyboard focus to the same bar.
+  chartGrid.querySelector(`.bar[data-chart="${chart}"][data-key="${key}"]`)?.focus({ preventScroll: true });
+});
+
+chartGrid.addEventListener("change", (event) => {
+  if (event.target.id !== "condition-field") return;
+  conditionKey = event.target.value;
+  chartSelections.conditions.clear();
+  applyChartFilters();
+});
+
+clearChartsButton.addEventListener("click", () => {
+  resetChartSelections();
+  applyChartFilters();
+});
+
+followMapInput.addEventListener("change", renderAnalytics);
+
+buildAnalytics();
+renderAnalytics();
+
+// --------------------------------------------------
 // Deck instance
 // --------------------------------------------------
 const deck = new Deck({
@@ -731,7 +1067,18 @@ const deck = new Deck({
   controller: true,
   layers: [mapLayer],
   getTooltip,
-  onViewStateChange: scheduleLabelUpdate,
+  onViewStateChange: () => {
+    scheduleLabelUpdate();
+    scheduleAnalyticsUpdate();
+  },
+  // Mark the hovered collision in the charts.
+  onHover: ({ object }) => {
+    const feature = object?.properties?.collision_year !== undefined ? object : null;
+    if (feature !== hoverFeature) {
+      hoverFeature = feature;
+      updateLinked();
+    }
+  },
   onClick: (info) => {
     // Pick at the click position even if no hover event came first.
     const object = info.object || deck.pickObject({ x: info.x, y: info.y, radius: 2 })?.object;
@@ -763,9 +1110,12 @@ function updateOverviewView() {
         },
   });
   scheduleLabelUpdate();
+  scheduleAnalyticsUpdate();
 }
 
-window.addEventListener("resize", updateOverviewView);
+// The map pane changes size when the window is resized, the filters
+// are hidden or shown, or the charts are rearranged.
+new ResizeObserver(updateOverviewView).observe(document.getElementById("map"));
 
 // Hiding the panel keeps its controls and scroll position intact.
 // Refit only an overview; preserve a closer location when possible.
@@ -774,12 +1124,12 @@ const showFiltersButton = document.getElementById("show-filters");
 const hideFiltersButton = document.getElementById("hide-filters");
 const collapsedFilterCount = document.getElementById("collapsed-filter-count");
 
-function setFiltersCollapsed(collapsed) {
+function setFiltersCollapsed(collapsed, moveFocus = true) {
   sidebar.hidden = collapsed;
   showFiltersButton.hidden = !collapsed;
   showFiltersButton.setAttribute("aria-expanded", String(!collapsed));
   updateOverviewView();
-  (collapsed ? showFiltersButton : hideFiltersButton).focus();
+  if (moveFocus) (collapsed ? showFiltersButton : hideFiltersButton).focus();
 }
 
 hideFiltersButton.addEventListener("click", () => setFiltersCollapsed(true));
@@ -902,10 +1252,10 @@ async function showSelectedYears(selections) {
   const request = ++displayRequest;
 
   if (selections.length === 0) {
-    displayedYears = [];
-    displayedFeatures = [];
+    clearDisplayedData();
     clearCollisionSelection();
     refreshMapLayers();
+    renderAnalytics();
 
     info.innerHTML = `
             <span class="result-number">—</span>
@@ -943,7 +1293,7 @@ async function showSelectedYears(selections) {
           Promise.all(sources.map(async (source) => [source, await loadRecordIndex(year, source)])),
         ]);
 
-        return createYearLayers(year, collisions, Object.fromEntries(entries), filters);
+        return filterYearFeatures(year, collisions, Object.fromEntries(entries), filters);
       }),
     );
 
@@ -952,19 +1302,17 @@ async function showSelectedYears(selections) {
       return;
     }
 
+    // New data starts with no chart selections, so no stale
+    // selection can hide records that have no bar to deselect.
+    resetChartSelections();
     displayedYears = results;
     displayedFeatures = results.flatMap((result) => result.features);
+    mapFeatures = displayedFeatures;
+    rebuildPointLayers();
     clearCollisionSelection();
     refreshMapLayers();
-    const total = displayedFeatures.length;
-
-    info.innerHTML = `
-            <span class="result-number">${total.toLocaleString("en-GB")}</span>
-            <div class="result-description">
-                <strong>${total === 1 ? "Matching collision" : "Matching collisions"}</strong>
-                <span>${total === 0 ? "No matches for this selection" : years.join(", ")}</span>
-            </div>
-        `;
+    updateInfo();
+    renderAnalytics();
     appliedSelection = getSelectionSignature(selections);
   } catch (error) {
     if (request !== displayRequest) {
@@ -1205,12 +1553,12 @@ clearButton.addEventListener("click", () => {
   updateSelectedYearsText();
 
   // Clear the displayed records, labels and selected collision.
-  displayedYears = [];
-  displayedFeatures = [];
+  clearDisplayedData();
   clearCollisionSelection();
   showLabelsInput.checked = false;
   labelField.value = "severity";
   refreshMapLayers();
+  renderAnalytics();
 
   const info = document.getElementById("info");
   info.setAttribute("aria-busy", "false");
@@ -1226,3 +1574,8 @@ clearButton.addEventListener("click", () => {
 openYearFilters(yearOptions.querySelector(".year-block:last-child"));
 updateFilterSummaries();
 updateSelectedYearsText();
+
+// On narrow screens the filters start hidden so the map and charts come first.
+if (window.matchMedia("(max-width: 800px)").matches) {
+  setFiltersCollapsed(true, false);
+}

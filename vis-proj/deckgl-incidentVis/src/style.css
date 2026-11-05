@@ -1,7 +1,7 @@
 /* --------------------------------------------------
    Warm neutrals, with orange reserved for interaction
    -------------------------------------------------- */
-:root {
+   :root {
     --accent: #ba511f;
     --accent-hover: #a54318;
     --accent-light: #fbefe7;
@@ -16,7 +16,7 @@
     box-sizing: border-box;
 }
 
-html, body, #app, #map {
+html, body, #app {
     margin: 0;
     width: 100%;
     height: 100%;
@@ -32,6 +32,8 @@ body {
 
 #app {
     position: relative;
+    display: flex;
+    overflow: hidden;
 }
 button, input {
     font: inherit;
@@ -58,20 +60,16 @@ button:focus-visible, input:focus-visible, .year-option:has(input:focus-visible)
    Fixed header and actions, scrollable filter body
    -------------------------------------------------- */
 #sidebar {
-    position: absolute;
-    top: 20px;
-    left: 20px;
+    position: relative;
+    flex: 0 0 352px;
     width: 352px;
-    max-width: calc(100vw - 32px);
-    max-height: calc(100dvh - 40px);
+    height: 100%;
     display: flex;
     flex-direction: column;
     background: var(--paper);
-    border: 1px solid rgba(107, 111, 98, 0.18);
-    border-radius: 16px;
-    box-shadow: 0 8px 32px rgba(48, 55, 41, 0.10), 0 1px 3px rgba(48, 55, 41, 0.05);
+    border-right: 1px solid var(--border);
     overflow: hidden;
-    z-index: 10;
+    z-index: 20;
 }
 
 .sidebar-header {
@@ -221,6 +219,7 @@ button:focus-visible, input:focus-visible, .year-option:has(input:focus-visible)
 }
 
 .sidebar-body {
+    flex: 1;
     padding: 16px 22px 10px;
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -699,7 +698,8 @@ h2 {
     top: 20px;
     width: 352px;
     max-width: calc(100vw - 40px);
-    max-height: calc(100dvh - 150px);
+    max-height: calc(100% - 150px);
+    min-height: min(220px, calc(100% - 40px));
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -908,13 +908,6 @@ h2 {
         top: 12px;
         left: 12px;
     }
-    #sidebar {
-        top: 12px;
-        left: 12px;
-        width: 320px;
-        max-width: calc(100vw - 24px);
-        max-height: calc(100dvh - 24px);
-    }
     .sidebar-header {
         padding: 16px 18px;
     }
@@ -929,7 +922,7 @@ h2 {
     }
     #map-display, #collision-details {
         right: 12px;
-        width: min(300px, calc(100vw - 24px));
+        width: min(300px, calc(100% - 24px));
     }
     #map-display {
         bottom: 12px;
@@ -937,6 +930,347 @@ h2 {
     #collision-details {
         top: 12px;
         z-index: 11;
+    }
+}
+
+/* --------------------------------------------------
+   Workspace: filters | map above coordinated charts
+   The map shares the screen with the analytical views
+   instead of sitting underneath floating panels.
+   -------------------------------------------------- */
+#workspace {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+#map-pane {
+    position: relative;
+    flex: 1 1 0;
+    min-height: 240px;
+    overflow: hidden;
+    background: var(--surface);
+}
+#map {
+    position: absolute;
+    inset: 0;
+}
+
+#analytics {
+    flex: 0 0 auto;
+    height: clamp(250px, 38vh, 380px);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+}
+.analytics-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 10px 18px 0;
+    flex-shrink: 0;
+}
+.analytics-header > div:first-child {
+    min-width: 0;
+}
+.analytics-title-row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+#analytics-status {
+    color: var(--muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
+.analytics-hint {
+    margin: 3px 0 0;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.4;
+}
+.analytics-controls {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-shrink: 0;
+}
+
+#chart-grid {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: repeat(14, minmax(0, 1fr));
+    grid-auto-rows: minmax(0, 1fr);
+    gap: 10px;
+    padding: 10px 18px 14px;
+    overflow: auto;
+}
+#chart-grid .chart-year { grid-column: span 2; }
+#chart-grid .chart-severity { grid-column: span 2; }
+#chart-grid .chart-hour { grid-column: span 3; }
+#chart-grid .chart-month { grid-column: span 3; }
+#chart-grid .chart-conditions { grid-column: span 4; }
+
+.chart-card {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    padding: 10px 12px 8px;
+    background: var(--paper);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+}
+.chart-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 24px;
+    flex-shrink: 0;
+}
+.chart-head h3 {
+    margin: 0;
+    font-size: 12px;
+    font-weight: 650;
+}
+.chart-head .text-button {
+    margin-left: auto;
+}
+.chart-head select {
+    min-height: 24px;
+    max-width: 130px;
+    margin-left: auto;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+}
+.chart-head select + .text-button {
+    margin-left: 0;
+}
+.chart-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+.chart-empty {
+    margin: auto;
+    color: var(--muted);
+    font-size: 11px;
+    text-align: center;
+}
+
+/* Bars are buttons, so every bar can be selected by keyboard. */
+.bar {
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+}
+.bar:hover {
+    background: #f0f2eb;
+}
+
+.column-chart {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    gap: 2px;
+}
+.bar-col {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+.bar-track {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    margin-top: 16px;
+}
+.bar-fill {
+    position: absolute;
+    left: 14%;
+    right: 14%;
+    bottom: 0;
+    height: var(--h, 0%);
+    min-height: 1px;
+    border-radius: 3px 3px 0 0;
+    background: var(--bar, #9aa491);
+    transition: height 200ms ease;
+}
+.bar-value {
+    position: absolute;
+    left: -4px;
+    right: -4px;
+    bottom: var(--h, 0%);
+    padding-bottom: 2px;
+    color: var(--muted);
+    font-size: 10px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+}
+.bar-axis {
+    height: 16px;
+    flex-shrink: 0;
+    color: var(--muted);
+    font-size: 10px;
+    line-height: 16px;
+    text-align: center;
+    white-space: nowrap;
+}
+
+.row-chart {
+    flex: 1;
+    min-height: 0;
+    margin: 0;
+    padding: 2px 0 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+}
+.bar-row {
+    width: 100%;
+    display: grid;
+    grid-template-columns: minmax(0, 40%) minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 5px;
+    font-size: 11px;
+}
+.row-label {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+.row-track {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--surface);
+    overflow: hidden;
+}
+.row-fill {
+    display: block;
+    width: var(--w, 0%);
+    height: 100%;
+    border-radius: 4px;
+    background: var(--bar, #9aa491);
+    transition: width 200ms ease;
+}
+.row-count {
+    min-width: 26px;
+    color: var(--muted);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Selected bars take the interaction colour; the rest recede. */
+.bar[aria-pressed="true"] .bar-fill,
+.bar[aria-pressed="true"] .row-fill {
+    background: var(--bar, var(--accent));
+}
+.bar[aria-pressed="true"] .bar-axis,
+.bar[aria-pressed="true"] .row-label {
+    color: var(--accent);
+    font-weight: 700;
+}
+.bar-row[aria-pressed="true"] {
+    background: var(--accent-light);
+}
+.has-selection .bar[aria-pressed="false"] .bar-fill,
+.has-selection .bar[aria-pressed="false"] .row-fill {
+    opacity: 0.35;
+}
+
+/* The hovered or selected map point, marked in each chart. */
+.bar.is-linked .bar-fill,
+.bar.is-linked .row-fill {
+    outline: 2px solid var(--text);
+    outline-offset: 1px;
+}
+.bar.is-linked .bar-axis,
+.bar.is-linked .row-label {
+    color: var(--text);
+    font-weight: 700;
+}
+
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+/* Narrower screens: charts wrap onto two rows. */
+@media (max-width: 1100px) {
+    #analytics {
+        height: clamp(280px, 46vh, 440px);
+    }
+    #chart-grid {
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        grid-auto-rows: minmax(190px, 1fr);
+    }
+    #chart-grid .chart-year,
+    #chart-grid .chart-severity { grid-column: span 2; }
+    #chart-grid .chart-conditions { grid-column: span 2; order: 3; }
+    #chart-grid .chart-hour,
+    #chart-grid .chart-month { grid-column: span 3; order: 4; }
+}
+
+/* Phones: the filters become an overlay and the page scrolls
+   through the map, then the charts. */
+@media (max-width: 800px) {
+    #sidebar {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        z-index: 30;
+        width: min(340px, 100vw);
+        box-shadow: 0 8px 32px rgba(48, 55, 41, 0.18);
+    }
+    #workspace {
+        overflow-y: auto;
+    }
+    #map-pane {
+        flex: none;
+        height: min(62dvh, 520px);
+    }
+    #analytics {
+        height: auto;
+        flex: none;
+    }
+    .analytics-header {
+        flex-wrap: wrap;
+    }
+    #chart-grid {
+        grid-template-columns: 1fr;
+        grid-auto-rows: 210px;
+        overflow: visible;
+    }
+    #chart-grid .chart-card {
+        grid-column: 1 / -1;
+        order: 0;
     }
 }
 
