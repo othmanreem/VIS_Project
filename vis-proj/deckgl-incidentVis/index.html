@@ -3,13 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Calderdale Collisions Visualization</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <title>IncidentVis · Calderdale collisions</title>
 </head>
 
 <body>
     <div id="app">
-        <aside id="sidebar" aria-label="Collision filters">
-            <div class="sidebar-header">
+        <!-- ============ Sidebar: summary, active filters, ranked hotspots ============ -->
+        <aside id="sidebar" aria-label="Hotspots and filters">
+            <div class="brand">
                 <span class="app-mark" aria-hidden="true">
                     <svg viewBox="0 0 32 32" fill="none">
                         <path d="M8 23L15 10L24 20" stroke="currentColor" stroke-width="1.5"/>
@@ -22,54 +24,64 @@
                     <h1>IncidentVis<span class="title-dot">.</span></h1>
                     <p>Calderdale <span aria-hidden="true">/</span> 2020–2025</p>
                 </div>
-                <button id="hide-filters" type="button" aria-label="Hide filters" aria-controls="sidebar" title="Hide filters">
-                    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 3L5 8l5 5"/></svg>
-                </button>
             </div>
 
-            <div id="info" role="status" aria-live="polite">
-                <span class="result-number">—</span>
-                <div class="result-description">
-                    <strong>Matching collisions</strong>
-                    <span>Select years to begin</span>
+            <div class="kpi" role="status" aria-live="polite">
+                <b id="kpi-n">—</b>
+                <div><strong>Matching collisions</strong><span id="kpi-sub">Loading…</span></div>
+            </div>
+
+            <div class="chips" id="chips"></div>
+
+            <div class="side-body">
+                <div class="sec-h"><h2>Where to look first</h2><span id="hs-count"></span></div>
+                <p class="hint">Dense collision areas, found automatically (DBSCAN: at least 10 collisions within 120 m). Hover a row to find it on the map. Click to select it.</p>
+                <div class="seg" id="sort" role="group" aria-label="Sort hotspots">
+                    <button type="button" data-sort="risk" aria-pressed="true">Risk score</button>
+                    <button type="button" data-sort="n" aria-pressed="false">Collisions</button>
+                    <button type="button" data-sort="ksi" aria-pressed="false">KSI %</button>
+                    <button type="button" data-sort="rising" aria-pressed="false">Rising</button>
                 </div>
+                <ol class="rank" id="rank"></ol>
             </div>
 
-            <div class="sidebar-body">
-                <div id="year-control">
-                    <div class="section-heading">
-                        <h2>Years <span id="selected-years-text">0 selected</span></h2>
-                        <button id="all-years-button" class="text-button" type="button">Select all</button>
+            <div class="side-foot">
+                <div class="sec-h">
+                    <span class="foot-label">Point colour</span>
+                    <div class="seg" id="colorby" role="group" aria-label="Point colour">
+                        <button type="button" data-c="year" aria-pressed="true">Year</button>
+                        <button type="button" data-c="sev" aria-pressed="false">Severity</button>
                     </div>
-                    <!-- Year choices and their filter editors are generated in main.js. -->
-                    <div class="year-options" id="year-options"></div>
                 </div>
-            </div>
-
-            <div class="sidebar-footer">
-                <div id="filter-status" role="status">Choose years to begin</div>
-                <div class="filter-actions">
-                    <button id="clear-button" type="button">Reset</button>
-                    <button id="view-button" type="button">
-                        <span>Apply filters</span><span aria-hidden="true">↗</span>
-                    </button>
-                </div>
-                <p class="legend-caption">Point colours represent years</p>
+                <div class="key" id="key"></div>
             </div>
         </aside>
 
         <main id="workspace">
+            <!-- ============ Map ============ -->
             <section id="map-pane" aria-label="Collision map">
                 <div id="map"></div>
+                <!-- Overlay for hotspot numbers, town names and lasso / box drawing -->
+                <svg id="overlay" aria-hidden="true"></svg>
 
-                <button id="show-filters" type="button" aria-controls="sidebar" aria-expanded="false" hidden>
-                    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                        <path d="M3 2v12M8 2v12M13 2v12M1 6h4M6 10h4M11 5h4"/>
-                    </svg>
-                    <span>Filters</span>
-                    <span id="collapsed-filter-count" hidden></span>
-                </button>
+                <div class="tools" role="toolbar" aria-label="Map tools">
+                    <button type="button" class="tool" data-mode="select" aria-pressed="true">✋ Select &amp; pan</button>
+                    <button type="button" class="tool" data-mode="lasso" aria-pressed="false">◌ Lasso area</button>
+                    <button type="button" class="tool" data-mode="box" aria-pressed="false">▭ Box</button>
+                    <button type="button" class="tool" id="hex-button" aria-pressed="false">⬡ Hexagons</button>
+                </div>
 
+                <div class="zoom">
+                    <button type="button" id="zoom-in" aria-label="Zoom in">+</button>
+                    <button type="button" id="zoom-out" aria-label="Zoom out">−</button>
+                    <button type="button" id="zoom-home" aria-label="Show all of Calderdale">⌂</button>
+                </div>
+
+                <div class="mapnote" id="mapnote"></div>
+                <div class="card" id="card"></div>
+                <div class="tip" id="tip" hidden></div>
+
+                <!-- Collision details (details on demand) -->
                 <section id="collision-details" aria-labelledby="details-title" hidden>
                     <div class="details-header">
                         <h2 id="details-title">Collision details</h2>
@@ -83,45 +95,53 @@
                     <div id="details-content" role="tabpanel" aria-labelledby="details-tab-collision" tabindex="0"></div>
                 </section>
 
-                <div id="map-display" role="group" aria-label="Map labels">
-                    <div class="map-display-controls">
-                        <label class="label-switch">
-                            <input id="show-labels" type="checkbox" role="switch">
-                            <span class="switch-track" aria-hidden="true"></span>
-                            <span>Labels</span>
-                        </label>
-                        <select id="label-field" aria-label="Label attribute" disabled>
-                            <option value="severity">Collision severity</option>
-                            <option value="weather">Weather</option>
-                            <option value="lighting">Lighting</option>
-                            <option value="roadClass">Road class</option>
-                            <option value="vehicleCount">Vehicle count</option>
-                            <option value="casualtyCount">Casualty count</option>
-                        </select>
-                    </div>
-                    <p id="label-status" aria-live="polite">Hover for details. Click to keep them open.</p>
+                <!-- Records of the selected area -->
+                <div class="drawer" id="drawer" hidden>
+                    <header>
+                        <h2 id="drawer-title">Records</h2>
+                        <button type="button" class="btn" id="drawer-close">Close table</button>
+                    </header>
+                    <div class="tbl"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
                 </div>
+
+                <div id="loading">Loading collision data…</div>
             </section>
 
-            <section id="analytics" aria-labelledby="analytics-title">
-                <div class="analytics-header">
-                    <div>
-                        <div class="analytics-title-row">
-                            <h2 id="analytics-title">Analysis</h2>
-                            <span id="analytics-status" role="status" aria-live="polite">Apply filters to populate the charts</span>
+            <!-- ============ Linked analysis ============ -->
+            <section id="analysis" aria-labelledby="analysis-title">
+                <div class="an-h">
+                    <h2 id="analysis-title">Analysis</h2>
+                    <span id="an-status"></span>
+                    <span class="legend-inline">
+                        <span><i class="lg-all"></i>all matching</span>
+                        <span><i class="lg-sel"></i>selected area</span>
+                        <span id="leg-b" hidden><i class="lg-cmp"></i>compared area</span>
+                    </span>
+                </div>
+                <div class="grid">
+                    <div class="panel">
+                        <div class="panel-h">
+                            <h2>Where collisions turn serious</h2>
+                            <div class="seg" id="risk-tab" role="group" aria-label="Group by">
+                                <button type="button" data-t="user" aria-pressed="true">Road user</button>
+                                <button type="button" data-t="light" aria-pressed="false">Lighting</button>
+                                <button type="button" data-t="wx" aria-pressed="false">Weather</button>
+                            </div>
                         </div>
-                        <p class="analytics-hint">Select bars to filter the map. Hover a point to see where it falls in each chart.</p>
+                        <p class="hint">Share killed or seriously injured (KSI). Click a bar to filter.</p>
+                        <svg id="risk-chart"></svg>
                     </div>
-                    <div class="analytics-controls">
-                        <button id="clear-chart-filters" class="text-button" type="button" hidden>Clear chart filters</button>
-                        <label class="label-switch">
-                            <input id="follow-map" type="checkbox" role="switch" checked>
-                            <span class="switch-track" aria-hidden="true"></span>
-                            <span>Follow map view</span>
-                        </label>
+                    <div class="panel">
+                        <div class="panel-h"><h2>Speed limit risk</h2></div>
+                        <p class="hint">KSI share per speed limit (mph). Dashed line = average. Click to filter.</p>
+                        <svg id="speed-chart"></svg>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-h"><h2>When collisions happen</h2></div>
+                        <p class="hint">Hour × weekday, darker = more. Dots = selected area. Click cells to filter.</p>
+                        <svg id="heat-chart"></svg>
                     </div>
                 </div>
-                <div id="chart-grid"></div>
             </section>
         </main>
     </div>

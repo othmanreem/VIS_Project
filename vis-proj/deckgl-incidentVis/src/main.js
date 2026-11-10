@@ -1,1581 +1,1042 @@
-import { Deck, WebMercatorViewport } from "@deck.gl/core";
-import { BitmapLayer, GeoJsonLayer, TextLayer } from "@deck.gl/layers";
+import { Deck, WebMercatorViewport, FlyToInterpolator } from "@deck.gl/core";
+import { BitmapLayer, PolygonLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { TileLayer } from "@deck.gl/geo-layers";
-import { CATEGORIES } from "./codes.js";
-import { DETAIL_CODES } from "./detailCodes.js";
+import { YEARS, YEAR_COLORS, USERS, LIGHT, WEATHER, SPEEDS, DAYS, SEVERITY_NAMES, loadAllData } from "./data.js";
+import { findHotspots, inPolygon } from "./hotspots.js";
+import { PLACES, nearestPlace } from "./places.js";
+import { createDetailsPanel, escapeHtml } from "./details.js";
+import { renderRisk, renderSpeed, renderHeat, ksiShare, fmt } from "./charts.js";
 import "./style.css";
 
-// --------------------------------------------------
-// Bounds of all 2,016 collision locations (2020-2025).
-// Fit the overview to the map pane, leaving some
-// surrounding area. The pane sits beside the filters and
-// above the charts, so no space needs reserving for them.
-// --------------------------------------------------
-const COLLISION_BOUNDS = [
-  [-2.17014, 53.625085],
-  [-1.731539, 53.78502],
-];
+// ==================================================
+// Hotspot explorer
+// 1. Sidebar ranks automatically found hotspots (DBSCAN).
+// 2. Selecting a hotspot, or drawing a lasso / box, opens a card
+//    that profiles the area against all matching collisions
+//    (or against a second, compared area).
+// 3. The analysis charts show risk and timing for everything,
+//    with the selected area marked; clicking them filters all views.
+// 4. Clicking a point opens the full collision details.
+// ==================================================
 
-function getOverviewViewState() {
-  const map = document.getElementById("map");
-  const width = map.clientWidth;
-  const height = map.clientHeight;
-  const padding = Math.min(64, width * 0.08, height * 0.12);
-
-  const overview = new WebMercatorViewport({ width, height }).fitBounds(
-    COLLISION_BOUNDS,
-    { padding },
-  );
-
-  const zoom = overview.zoom - 0.3;
-  const viewport = new WebMercatorViewport({
-    width,
-    height,
-    longitude: overview.longitude,
-    latitude: overview.latitude,
-    zoom,
-  });
-
-  return {
-    longitude: overview.longitude,
-    latitude: overview.latitude,
-    zoom,
-    minZoom: zoom,
-    // Keep panning inside the area visible at full overview.
-    maxBounds: [
-      viewport.unproject([0, height]),
-      viewport.unproject([width, 0]),
-    ],
-    pitch: 0,
-    bearing: 0,
-  };
-}
-
-const INITIAL_VIEW_STATE = getOverviewViewState();
-
-// --------------------------------------------------
-// One fixed color for each year.
-// The same color is used in the year choices and points.
-// Optional map labels use neutral text for readability.
-// --------------------------------------------------
-const YEAR_COLORS = {
-  2020: [230, 126, 34, 210],
-  2021: [52, 152, 219, 210],
-  2022: [46, 204, 113, 210],
-  2023: [155, 89, 182, 210],
-  2024: [241, 196, 15, 220],
-  2025: [231, 76, 60, 210],
+const $ = (id) => document.getElementById(id);
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const hexToRgb = (hex) => {
+  const value = hex.replace("#", "");
+  return [0, 2, 4].map((i) => parseInt(value.slice(i, i + 2), 16));
 };
 
-const YEARS = Object.keys(YEAR_COLORS);
+const COLLISION_BOUNDS = [[-2.17014, 53.625085], [-1.731539, 53.78502]];
 
 // --------------------------------------------------
-// Base map
+// State
 // --------------------------------------------------
-const mapLayer = new TileLayer({
+const state = {
+  filters: { user: new Set(), light: new Set(), wx: new Set(), spd: new Set(), cell: new Set(), yr: new Set() },
+  selA: null, // { type: "hotspot", id } or { type: "area", tool, poly, ids, label }
+  selB: null, // second area for comparison
+  pickB: false, // waiting for the user to pick the second area
+  mode: "select", // select | lasso | box
+  hex: false,
+  colorBy: "year",
+  sort: "risk",
+  riskTab: "user",
+  hoverHs: null,
+  hoverPt: null,
+  drawer: false,
+  tableSort: { key: "date", dir: -1 },
+};
+
+let P = []; // all collision records
+let HS = []; // hotspots
+let F = []; // records passing the filters
+const inF = new Set(); // indices of F
+let stats = []; // ranked hotspot statistics for the current filters
+let statsById = new Map();
+let drawOrder = []; // F sorted slight → fatal, so serious collisions are drawn on top
+let hotspotPolygons = []; // stats with a drawable outline
+let version = 0; // bumped on every state change, so deck.gl restyles the layers
+
+// --------------------------------------------------
+// Filters
+// --------------------------------------------------
+const FIELD_FILTERS = ["user", "light", "wx", "spd", "yr"];
+
+function passes(record, skip = null) {
+  for (const key of FIELD_FILTERS) {
+    if (key !== skip && state.filters[key].size && !state.filters[key].has(record[key])) return false;
+  }
+  if (skip !== "cell" && state.filters.cell.size && !state.filters.cell.has(`${record.dow}-${record.hr}`)) return false;
+  return true;
+}
+
+function recompute() {
+  F = P.filter((record) => passes(record));
+  inF.clear();
+  F.forEach((record) => inF.add(record.i));
+  drawOrder = F.slice().sort((a, b) => b.sev - a.sev);
+  computeHotspotStats();
+}
+
+function toggleFilter(key, value) {
+  const set = state.filters[key];
+  if (set.has(value)) set.delete(value);
+  else set.add(value);
+  update();
+}
+
+// --------------------------------------------------
+// Selections
+// --------------------------------------------------
+function selPoints(sel) {
+  if (!sel) return [];
+  const ids = sel.type === "hotspot" ? HS[sel.id].members : sel.ids;
+  return ids.filter((i) => inF.has(i)).map((i) => P[i]);
+}
+
+function selName(sel) {
+  if (!sel) return "";
+  if (sel.type === "hotspot") {
+    const h = HS[sel.id];
+    return `${h.town}${h.road ? ` · ${h.road}` : ""}`;
+  }
+  return sel.label;
+}
+
+function setSelection(sel) {
+  if (state.pickB && state.selA) {
+    state.selB = sel;
+    state.pickB = false;
+  } else {
+    state.selA = sel;
+    state.selB = null;
+    state.pickB = false;
+  }
+  update();
+  zoomToSelection();
+}
+
+function selectHotspot(id) {
+  setSelection({ type: "hotspot", id });
+}
+
+function clearSelection() {
+  state.selA = null;
+  state.selB = null;
+  state.pickB = false;
+  state.drawer = false;
+  update();
+  fitBounds(COLLISION_BOUNDS);
+}
+
+// --------------------------------------------------
+// Statistics
+// --------------------------------------------------
+const PROFILE = [
+  ["Pedestrian involved", (r) => r.user === 1],
+  ["Cyclist / motorcyclist", (r) => r.user >= 2],
+  ["Killed or serious", (r) => r.sev <= 2],
+  ["In darkness", (r) => r.light === 1 || r.light === 2],
+  ["Wet / icy surface", (r) => r.wet === 1],
+  ["At a junction", (r) => r.junc === 1],
+  ["Weekend", (r) => r.dow >= 5],
+];
+const share = (records, fn) => (records.length ? (100 * records.filter(fn).length) / records.length : 0);
+
+function computeHotspotStats() {
+  const all = HS.map((h) => {
+    const members = h.members.filter((i) => inF.has(i)).map((i) => P[i]);
+    const yrs = YEARS.map((year) => members.filter((r) => r.yr === year).length);
+    const k = ksiShare(members);
+    return {
+      h, n: members.length, ksi: k, ped: share(members, (r) => r.user === 1), yrs,
+      // Risk score: more collisions and a higher KSI share rank higher.
+      score: members.length * (1 + k / 100),
+      // Rising: collisions in 2024–25 minus 2022–23.
+      rising: (yrs[4] + yrs[5]) - (yrs[2] + yrs[3]),
+    };
+  }).filter((s) => s.n > 0);
+  const key = { risk: (s) => -s.score, n: (s) => -s.n, ksi: (s) => -s.ksi, rising: (s) => -s.rising }[state.sort];
+  stats = all.sort((a, b) => key(a) - key(b));
+  stats.forEach((s, i) => { s.rank = i + 1; });
+  statsById = new Map(stats.map((s) => [s.h.id, s]));
+  hotspotPolygons = stats.filter((s) => s.h.hull.length >= 3);
+}
+
+// --------------------------------------------------
+// Map (deck.gl)
+// --------------------------------------------------
+const basemap = new TileLayer({
   id: "basemap",
   data: "https://cartodb-basemaps-a.global.ssl.fastly.net/light_all/{z}/{x}/{y}.png?key=cb1_304d_1_6699e7fd199a1afd970583e4",
   minZoom: 0,
   maxZoom: 19,
   tileSize: 256,
-
   renderSubLayers: (props) => {
-    const {
-      bbox: { west, south, east, north },
-    } = props.tile;
-
-    return new BitmapLayer(props, {
-      data: null,
-      image: props.data,
-      bounds: [west, south, east, north],
-    });
+    const { west, south, east, north } = props.tile.bbox;
+    return new BitmapLayer(props, { data: null, image: props.data, bounds: [west, south, east, north] });
   },
 });
 
-// --------------------------------------------------
-// Data loading (cached, so re-pressing View is fast)
-// Expected files:
-// /calderdale_collisions_YYYY.geojson
-// /vehicles/calderdale_vehicles_YYYY.geojson
-// /casualties/calderdale_casualties_YYYY.geojson
-// --------------------------------------------------
-const fetchCache = new Map();
-
-function fetchGeoJson(url, errorMessage) {
-  if (!fetchCache.has(url)) {
-    const request = fetch(url)
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error(errorMessage);
-        }
-        return response.json();
-      })
-      .catch((error) => {
-        fetchCache.delete(url);
-        throw error;
-      });
-
-    fetchCache.set(url, request);
-  }
-
-  return fetchCache.get(url);
+function mapSize() {
+  const pane = $("map-pane");
+  return { width: pane.clientWidth || 800, height: pane.clientHeight || 500 };
 }
 
-function loadYearData(year) {
-  return fetchGeoJson(
-    `collisions/calderdale_collisions_${year}.geojson`,
-    `Could not load collision data for ${year}.`,
-  );
+let overviewZoom = 11;
+
+function overviewView() {
+  const { width, height } = mapSize();
+  const fit = new WebMercatorViewport({ width, height }).fitBounds(COLLISION_BOUNDS, { padding: Math.min(40, width / 8, height / 8) });
+  overviewZoom = fit.zoom;
+  return { longitude: fit.longitude, latitude: fit.latitude, zoom: fit.zoom };
 }
 
-// --------------------------------------------------
-// Keep whole linked records instead of separate sets of codes.
-// Combined vehicle filters must match the same vehicle;
-// combined casualty filters must match the same person.
-// --------------------------------------------------
-const recordIndexCache = new Map();
-const LINKED_SOURCES = { vehicle: "vehicles", casualty: "casualties" };
-const FILTER_GROUPS = [
-  { source: "collision", label: "Collision conditions", hint: "Conditions recorded for the collision." },
-  { source: "vehicle", label: "Vehicles and drivers", hint: "One vehicle must match all chosen vehicle and driver conditions." },
-  { source: "casualty", label: "Casualties", hint: "One casualty must match all chosen casualty conditions. This can be a different person from the matching driver." },
-];
+let viewState = { longitude: -1.95, latitude: 53.705, zoom: 11, pitch: 0, bearing: 0 };
 
-async function loadRecordIndex(year, source) {
-  const key = `${source}:${year}`;
-  if (recordIndexCache.has(key)) {
-    return recordIndexCache.get(key);
-  }
-
-  const folder = LINKED_SOURCES[source];
-  const data = await fetchGeoJson(
-    `${folder}/calderdale_${folder}_${year}.geojson`,
-    `Could not load ${folder} data for ${year}.`,
-  );
-
-  const index = new Map();
-
-  for (const feature of data.features) {
-    const props = feature.properties || {};
-    if (!index.has(props.collision_index)) {
-      index.set(props.collision_index, []);
-    }
-    index.get(props.collision_index).push(props);
-  }
-
-  recordIndexCache.set(key, index);
-  return index;
+function viewport() {
+  const { width, height } = mapSize();
+  return new WebMercatorViewport({ ...viewState, width, height });
 }
 
-// --------------------------------------------------
-// Values within one category use OR; categories use AND.
-// An empty category places no restriction on the records.
-// --------------------------------------------------
-function matchesCategories(record, categories, filters) {
-  return categories.every((category) => {
-    const value = record[category.field];
-    const code = value === undefined || value === null || value === "" ? "-1" : String(value);
-    return filters[category.key].has(code);
-  });
-}
-
-// code -> label lookup for each category (built once)
-const LABELS = {};
-CATEGORIES.forEach((cat) => {
-  LABELS[cat.key] = Object.fromEntries(cat.codes.map((c) => [c.code, c.label]));
-});
-
-// --------------------------------------------------
-// Displayed records, selected collision and label controls
-// --------------------------------------------------
-let displayedYears = [];
-let displayedFeatures = [];
-// Features that pass the chart selections are drawn on the map.
-let mapFeatures = [];
-let pointLayers = [];
-let hoverFeature = null;
-let selectedCollision = null;
-let selectedGroup = [];
-let selectedRecords = { vehicle: null, casualty: null };
-let activeDetailsTab = "collision";
-let detailsRequest = 0;
-let labelFrame = 0;
-
-const showLabelsInput = document.getElementById("show-labels");
-const labelField = document.getElementById("label-field");
-const labelStatus = document.getElementById("label-status");
-const detailsPanel = document.getElementById("collision-details");
-const detailsContent = document.getElementById("details-content");
-const labelContext = document.createElement("canvas").getContext("2d");
-
-// Labels verified against the stored official DfT code guide.
-const SURFACE_LABELS = {
-  1: "Dry", 2: "Wet or damp", 3: "Snow", 4: "Frost or ice",
-  5: "Flood over 3 cm deep", 6: "Oil or diesel", 7: "Mud",
-  9: "Unknown (self-reported)",
-};
-
-function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (character) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  })[character]);
-}
-
-function recordedValue(value) {
-  return value === undefined || value === null || value === "" || String(value) === "-1"
-    ? "Not recorded"
-    : String(value);
-}
-
-function categoryLabel(key, value) {
-  const recorded = recordedValue(value);
-  return recorded === "Not recorded" ? recorded : LABELS[key]?.[String(value)] || `Unknown code (${recorded})`;
-}
-
-function collisionKey(feature) {
-  const p = feature.properties;
-  return `${p.collision_year}:${p.collision_index}`;
-}
-
-function collisionRows(feature) {
-  const p = feature.properties;
-  const speed = recordedValue(p.speed_limit);
-  const surface = recordedValue(p.road_surface_conditions);
-
-  return [
-    ["Collision severity", categoryLabel("severity", p.collision_severity)],
-    ["Date", recordedValue(p.date)],
-    ["Time", recordedValue(p.time)],
-    ["Lighting", categoryLabel("lighting", p.light_conditions)],
-    ["Weather", categoryLabel("weather", p.weather_conditions)],
-    ["Road class", categoryLabel("roadClass", p.first_road_class)],
-    ["Road type", categoryLabel("roadType", p.road_type)],
-    ["Road number", recordedValue(p.first_road_number)],
-    ["Road surface", SURFACE_LABELS[surface] || surface],
-    ["Speed limit", speed === "Not recorded" ? speed : `${speed} mph`],
-    ["Vehicles", recordedValue(p.number_of_vehicles)],
-    ["Casualties", recordedValue(p.number_of_casualties)],
-  ];
-}
-
-// --------------------------------------------------
-// Sidebar filters decide which records are loaded for each
-// year; chart selections then narrow what the map draws.
-// Label visibility is controlled separately.
-// --------------------------------------------------
-function filterYearFeatures(year, collisions, indexes, filters) {
-  const groups = FILTER_GROUPS.map((group) => ({
-    ...group,
-    categories: CATEGORIES.filter((cat) => cat.source === group.source && filters[cat.key]),
-  })).filter((group) => group.categories.length > 0);
-  const features = collisions.features.filter(
-    (feature) => feature.geometry && groups.every((group) =>
-      group.source === "collision"
-        ? matchesCategories(feature.properties, group.categories, filters)
-        : (indexes[group.source]?.get(feature.properties.collision_index) || [])
-          .some((record) => matchesCategories(record, group.categories, filters)),
-    ),
-  );
-
-  return { year, features };
-}
-
-function createPointLayer(year, features) {
-  const pointLayer = new GeoJsonLayer({
-    id: `collisions-${year}`,
-    data: { type: "FeatureCollection", features },
-    pointType: "circle",
-    filled: true,
-    stroked: true,
-    getFillColor: YEAR_COLORS[year],
-    getLineColor: [255, 255, 255, 255],
-    getPointRadius: 45,
-    pointRadiusMinPixels: 4,
-    pointRadiusMaxPixels: 12,
-    lineWidthMinPixels: 1,
-    pickable: true,
-    autoHighlight: true,
-    highlightColor: [40, 44, 41, 70],
-    updateTriggers: { getFillColor: [year] },
-  });
-
-  return pointLayer;
-}
-
-function rebuildPointLayers() {
-  const byYear = new Map();
-  mapFeatures.forEach((feature) => {
-    const year = String(feature.properties.collision_year);
-    if (!byYear.has(year)) byYear.set(year, []);
-    byYear.get(year).push(feature);
-  });
-  pointLayers = displayedYears.map(({ year }) => createPointLayer(year, byYear.get(year) || []));
-}
-
-// --------------------------------------------------
-// Short, neutral labels at closer zooms only.
-// A small screen grid keeps labels clear of other labels,
-// point symbols, panel edges and the visible controls.
-// All collision points remain on the map.
-// --------------------------------------------------
-function createLabelLayer() {
-  labelField.disabled = !showLabelsInput.checked;
-
-  if (!showLabelsInput.checked) {
-    labelStatus.textContent = "Hover for details. Click to keep them open.";
-    return null;
-  }
-
-  if (mapFeatures.length === 0) {
-    labelStatus.textContent = displayedYears.length > 0
-      ? "No matching collisions to label. Try changing the filters."
-      : "Apply a year selection to show labels.";
-    return null;
-  }
-
-  const viewport = deck.getViewports()[0];
-  const minimumZoom = Math.max(12, deck.props.initialViewState.minZoom + 1);
-  if (viewport.zoom < minimumZoom) {
-    labelStatus.textContent = "Zoom in to reveal labels. Matching dots are retained.";
-    return null;
-  }
-
-  const mapRect = document.getElementById("map").getBoundingClientRect();
-  const panels = ["show-filters", "map-display", "collision-details"]
-    .map((id) => document.getElementById(id))
-    .filter((panel) => !panel.hidden)
-    .map((panel) => {
-      const rect = panel.getBoundingClientRect();
-      return { left: rect.left - mapRect.left - 6, top: rect.top - mapRect.top - 6,
-        right: rect.right - mapRect.left + 6, bottom: rect.bottom - mapRect.top + 6 };
-    });
-
-  const cells = new Map();
-  const cellSize = 64;
-  function cellKeys(box) {
-    const keys = [];
-    for (let x = Math.floor(box.left / cellSize); x <= Math.floor(box.right / cellSize); x++) {
-      for (let y = Math.floor(box.top / cellSize); y <= Math.floor(box.bottom / cellSize); y++) {
-        keys.push(`${x}:${y}`);
-      }
-    }
-    return keys;
-  }
-  function reserve(box) {
-    cellKeys(box).forEach((key) => {
-      if (!cells.has(key)) cells.set(key, []);
-      cells.get(key).push(box);
-    });
-  }
-  function overlaps(box) {
-    return cellKeys(box).some((key) => (cells.get(key) || []).some((other) =>
-      box.left < other.right && box.right > other.left && box.top < other.bottom && box.bottom > other.top,
-    ));
-  }
-
-  panels.forEach(reserve);
-  const points = mapFeatures.map((feature) => {
-    const [x, y] = viewport.project(feature.geometry.coordinates);
-    const radius = Math.max(4, Math.min(12, 45 * viewport.distanceScales.unitsPerMeter[0] * viewport.scale));
-    const key = collisionKey(feature);
-    // Stable ordering mixes years instead of always favouring the first year.
-    const priority = selectedCollision && key === collisionKey(selectedCollision) ? -1
-      : Array.from(key).reduce((hash, character) => (hash * 31 + character.charCodeAt(0)) >>> 0, 0);
-    return { feature, x, y, radius, priority };
-  }).filter(({ x, y }) => x >= 0 && y >= 0 && x <= viewport.width && y <= viewport.height);
-
-  points.forEach(({ x, y, radius }) => reserve({
-    left: x - radius - 2, right: x + radius + 2,
-    top: y - radius - 2, bottom: y + radius + 2,
-  }));
-  points.sort((a, b) => a.priority - b.priority);
-
-  const category = CATEGORIES.find((cat) => cat.key === labelField.value);
-  const countField = labelField.value === "vehicleCount" ? "number_of_vehicles"
-    : labelField.value === "casualtyCount" ? "number_of_casualties" : null;
-  const labels = [];
-  labelContext.font = '500 12px "Segoe UI", Arial';
-
-  for (const { feature, x, y, radius } of points) {
-    if (panels.some((box) => x >= box.left && x <= box.right && y >= box.top && y <= box.bottom)) continue;
-    const count = countField ? recordedValue(feature.properties[countField]) : null;
-    const text = countField
-      ? `${count} ${labelField.value === "vehicleCount" ? (count === "1" ? "vehicle" : "vehicles") : (count === "1" ? "casualty" : "casualties")}`
-      : categoryLabel(category.key, feature.properties[category.field]);
-    const width = Math.ceil(labelContext.measureText(text).width) + 6;
-    const height = 20;
-    const distance = radius + 7;
-    const candidates = [
-      [distance + width / 2, 0], [-distance - width / 2, 0],
-      [0, -distance - height / 2], [0, distance + height / 2],
-      [distance + width / 2, -distance - height / 2],
-      [-distance - width / 2, distance + height / 2],
-    ];
-
-    for (const offset of candidates) {
-      const box = { left: x + offset[0] - width / 2, right: x + offset[0] + width / 2,
-        top: y + offset[1] - height / 2, bottom: y + offset[1] + height / 2 };
-      if (box.left < 8 || box.top < 8 || box.right > viewport.width - 8 || box.bottom > viewport.height - 8 || overlaps(box)) continue;
-      reserve(box);
-      labels.push({ position: feature.geometry.coordinates, text, offset });
-      break;
-    }
-  }
-
-  labelStatus.textContent = labels.length === 0
-    ? "No room for labels here. Hover a dot for details."
-    : `${labels.length} ${labels.length === 1 ? "label" : "labels"} shown · ${countField ? "totals per collision, including all involved" : "overlaps hidden, dots unchanged"}`;
-
-  return new TextLayer({
-    id: "collision-labels",
-    data: labels,
-    getPosition: (d) => d.position,
-    getText: (d) => d.text,
-    getPixelOffset: (d) => d.offset,
-    getColor: [40, 44, 41, 255],
-    getSize: 12,
-    getTextAnchor: "middle",
-    getAlignmentBaseline: "center",
-    fontFamily: "Segoe UI, Arial, sans-serif",
-    fontWeight: 500,
-    fontSettings: { sdf: true },
-    outlineWidth: 2,
-    outlineColor: [255, 254, 250, 255],
-    pickable: false,
-  });
-}
-
-function refreshMapLayers() {
-  const layers = [mapLayer, ...pointLayers];
-
-  if (selectedCollision) {
-    layers.push(new GeoJsonLayer({
-      id: "selected-collision",
-      data: { type: "FeatureCollection", features: [selectedCollision] },
-      pointType: "circle", filled: false, stroked: true,
-      getLineColor: [40, 44, 41, 255], getPointRadius: 55,
-      pointRadiusMinPixels: 7, pointRadiusMaxPixels: 16,
-      lineWidthMinPixels: 2, pickable: false,
-    }));
-  }
-
-  const labels = createLabelLayer();
-  if (labels) layers.push(labels);
-  deck.setProps({ layers });
-}
-
-function scheduleLabelUpdate() {
-  if (!showLabelsInput.checked || labelFrame) return;
-  labelFrame = requestAnimationFrame(() => {
-    labelFrame = 0;
-    refreshMapLayers();
-  });
-}
-
-// --------------------------------------------------
-// Hover gives a quick, decoded summary. Click keeps the
-// record open and highlights its actual map location.
-// --------------------------------------------------
-function getTooltip({ object }) {
-  if (!object?.properties) return null;
-  if (selectedCollision && collisionKey(object) === collisionKey(selectedCollision)) return null;
-  const p = object.properties;
-  const rows = collisionRows(object);
+// Keep the view on Calderdale.
+function clampView(next) {
+  const minZoom = overviewZoom - 0.6;
   return {
-    html: `<div class="tooltip-content">
-      <strong>${escapeHtml(p.collision_year)} · ${escapeHtml(categoryLabel("severity", p.collision_severity))} collision</strong>
-      <span class="tooltip-date">${escapeHtml(p.date)} · ${escapeHtml(p.time)}</span>
-      <dl>${rows.filter(([name]) => ["Lighting", "Weather", "Speed limit", "Vehicles", "Casualties"].includes(name))
-        .map(([name, value]) => `<div><dt>${name}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>
-      <span class="tooltip-hint">Click to inspect this collision</span>
-    </div>`,
-    style: { backgroundColor: "#fffefa", color: "#282c29", borderRadius: "9px", padding: "13px", maxWidth: "290px" },
+    ...next,
+    zoom: Math.max(minZoom, Math.min(18, next.zoom)),
+    longitude: Math.max(COLLISION_BOUNDS[0][0] - 0.1, Math.min(COLLISION_BOUNDS[1][0] + 0.1, next.longitude)),
+    latitude: Math.max(COLLISION_BOUNDS[0][1] - 0.05, Math.min(COLLISION_BOUNDS[1][1] + 0.05, next.latitude)),
+    pitch: 0,
+    bearing: 0,
   };
 }
 
+function setView(next, animate) {
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  viewState = clampView({
+    ...viewState,
+    ...next,
+    transitionDuration: animate && !reduce ? 600 : 0,
+    transitionInterpolator: animate && !reduce ? new FlyToInterpolator() : undefined,
+  });
+  deck.setProps({ viewState });
+  scheduleFrame();
+}
+
+function fitBounds(bounds, animate = true) {
+  const { width, height } = mapSize();
+  const card = $("card");
+  let right = width > 700 ? card.offsetWidth + 36 : 30;
+  if (width - right - 40 < 120) right = 30;
+  const small = height < 260;
+  const fit = new WebMercatorViewport({ width, height }).fitBounds(bounds, {
+    padding: { top: small ? 10 : 60, bottom: small ? 10 : 40, left: 40, right },
+    maxZoom: 17,
+  });
+  setView({ longitude: fit.longitude, latitude: fit.latitude, zoom: fit.zoom }, animate);
+}
+
+function boundsOf(records) {
+  const pad = 0.002;
+  const lons = records.map((r) => r.lon);
+  const lats = records.map((r) => r.lat);
+  return [[Math.min(...lons) - pad, Math.min(...lats) - pad], [Math.max(...lons) + pad, Math.max(...lats) + pad]];
+}
+
+function zoomToSelection() {
+  const records = [...selPoints(state.selA), ...selPoints(state.selB)];
+  if (records.length) fitBounds(boundsOf(records));
+}
+
+// Point size grows a little as you zoom in.
+const pointRadius = () => Math.max(2.4, Math.min(6, 2.4 + (viewState.zoom - overviewZoom) * 0.9));
+
+function pointColor(record) {
+  return state.colorBy === "year" ? YEAR_COLORS[record.yr] : SEVERITY_RGB[record.sev - 1];
+}
+let SEVERITY_RGB = [[122, 26, 20], [216, 73, 43], [242, 154, 91]];
+
+// Hexagons are binned in screen space so they keep a constant size on screen.
+const HEX_RAMP = [[243, 217, 194], [234, 176, 132], [221, 134, 83], [194, 88, 45], [138, 42, 28]];
+
+function hexBins() {
+  const vp = viewport();
+  const R = 15;
+  const { width, height } = mapSize();
+  const bins = new Map();
+  for (const record of F) {
+    const [x, y] = vp.project(record.position);
+    if (x < -R || y < -R || x > width + R || y > height + R) continue;
+    const q = ((x * Math.sqrt(3)) / 3 - y / 3) / R;
+    const r = ((y * 2) / 3) / R;
+    let rx = Math.round(q);
+    let rz = Math.round(r);
+    const ry = Math.round(-q - r);
+    const dx = Math.abs(rx - q);
+    const dz = Math.abs(rz - r);
+    const dy = Math.abs(ry + q + r);
+    if (dx > dy && dx > dz) rx = -ry - rz;
+    else if (dz > dy) rz = -rx - ry;
+    const key = `${rx},${rz}`;
+    if (!bins.has(key)) bins.set(key, { q: rx, r: rz, records: [] });
+    bins.get(key).records.push(record);
+  }
+  const max = Math.max(1, ...[...bins.values()].map((b) => b.records.length));
+  const selected = new Set(selPoints(state.selA).map((r) => r.i));
+  return [...bins.values()].map((bin) => {
+    const cx = Math.sqrt(3) * R * (bin.q + bin.r / 2);
+    const cy = 1.5 * R * bin.r;
+    const size = R * (0.45 + 0.55 * Math.sqrt(bin.records.length / max));
+    const polygon = [];
+    for (let i = 0; i < 6; i++) {
+      const angle = (Math.PI / 180) * (60 * i - 30);
+      polygon.push(vp.unproject([cx + size * Math.cos(angle), cy + size * Math.sin(angle)]));
+    }
+    return {
+      polygon,
+      n: bin.records.length,
+      ksi: ksiShare(bin.records),
+      inSelection: selected.size > 0 && bin.records.some((r) => selected.has(r.i)),
+    };
+  });
+}
+
+let ringRecord = null; // collision shown in the details panel
+
+function buildLayers() {
+  const layers = [basemap];
+  const A = state.selA ? new Set(selPoints(state.selA).map((r) => r.i)) : null;
+  const B = state.selB ? new Set(selPoints(state.selB).map((r) => r.i)) : null;
+  const anySelection = Boolean(A || B);
+  const selRgb = hexToRgb(css("--sel"));
+  const cmpRgb = hexToRgb(css("--cmp"));
+  const inkRgb = hexToRgb(css("--text"));
+  const selectionKey = version;
+
+  if (state.hex) {
+    layers.push(new PolygonLayer({
+      id: "hexagons",
+      data: hexBins(),
+      getPolygon: (d) => d.polygon,
+      getFillColor: (d) => HEX_RAMP[Math.min(4, Math.floor(d.ksi / 12))].concat(anySelection && !d.inSelection ? 90 : 240),
+      stroked: true,
+      getLineColor: (d) => (d.inSelection ? selRgb : [255, 254, 250]),
+      getLineWidth: (d) => (d.inSelection ? 2 : 0.8),
+      lineWidthUnits: "pixels",
+      pickable: true,
+    }));
+  }
+
+  // Hotspot outlines (also the click / hover target for a hotspot).
+  layers.push(new PolygonLayer({
+    id: "hotspots",
+    data: hotspotPolygons,
+    getPolygon: (s) => s.h.hull,
+    filled: true,
+    getFillColor: (s) => {
+      if (state.selA?.type === "hotspot" && state.selA.id === s.h.id) return selRgb.concat(36);
+      if (state.selB?.type === "hotspot" && state.selB.id === s.h.id) return cmpRgb.concat(36);
+      if (state.hoverHs === s.h.id) return inkRgb.concat(24);
+      return inkRgb.concat(4); // nearly invisible, but still clickable
+    },
+    stroked: true,
+    getLineColor: (s) => {
+      if (state.selA?.type === "hotspot" && state.selA.id === s.h.id) return selRgb;
+      if (state.selB?.type === "hotspot" && state.selB.id === s.h.id) return cmpRgb;
+      return inkRgb.concat(state.hoverHs === s.h.id ? 255 : 140);
+    },
+    getLineWidth: (s) => ((state.selA?.id === s.h.id && state.selA?.type === "hotspot")
+      || (state.selB?.id === s.h.id && state.selB?.type === "hotspot") || state.hoverHs === s.h.id ? 2.2 : 1),
+    lineWidthUnits: "pixels",
+    lineJointRounded: true,
+    pickable: true,
+    updateTriggers: { getFillColor: [selectionKey, state.hoverHs], getLineColor: [selectionKey, state.hoverHs], getLineWidth: [selectionKey, state.hoverHs] },
+  }));
+
+  // Lasso / box areas.
+  const areas = [[state.selA, selRgb], [state.selB, cmpRgb]]
+    .filter(([sel]) => sel && sel.type === "area")
+    .map(([sel, rgb]) => ({ polygon: sel.poly, rgb }));
+  if (areas.length) {
+    layers.push(new PolygonLayer({
+      id: "areas",
+      data: areas,
+      getPolygon: (d) => d.polygon,
+      getFillColor: (d) => d.rgb.concat(28),
+      getLineColor: (d) => d.rgb,
+      getLineWidth: 2,
+      lineWidthUnits: "pixels",
+    }));
+  }
+
+  if (!state.hex) {
+    const radius = pointRadius();
+    layers.push(new ScatterplotLayer({
+      id: "collisions",
+      // Slight first, so serious and fatal collisions are drawn on top.
+      data: drawOrder,
+      getPosition: (r) => r.position,
+      getRadius: (r) => ((A && A.has(r.i)) || (B && B.has(r.i)) ? radius + 0.6 : radius),
+      radiusUnits: "pixels",
+      getFillColor: (r) => pointColor(r).concat(anySelection && !(A?.has(r.i) || B?.has(r.i)) ? 64 : 242),
+      stroked: true,
+      getLineColor: [255, 254, 250, 230],
+      getLineWidth: (r) => (anySelection && !(A?.has(r.i) || B?.has(r.i)) ? 0.3 : 0.8),
+      lineWidthUnits: "pixels",
+      pickable: true,
+      updateTriggers: {
+        getRadius: [selectionKey, radius],
+        getFillColor: [selectionKey, state.colorBy],
+        getLineWidth: [selectionKey],
+      },
+    }));
+
+    const ring = ringRecord ?? (state.hoverPt != null ? P[state.hoverPt] : null);
+    if (ring && inF.has(ring.i)) {
+      layers.push(new ScatterplotLayer({
+        id: "ring",
+        data: [ring],
+        getPosition: (r) => r.position,
+        getRadius: radius + 5,
+        radiusUnits: "pixels",
+        filled: false,
+        stroked: true,
+        getLineColor: inkRgb,
+        getLineWidth: 1.8,
+        lineWidthUnits: "pixels",
+      }));
+    }
+  }
+  return layers;
+}
+
+function onHover(info) {
+  const { object, layer, x, y } = info;
+  let changed = false;
+  if (layer?.id === "collisions" && object) {
+    changed = state.hoverPt !== object.i || state.hoverHs !== null;
+    state.hoverPt = object.i;
+    state.hoverHs = null;
+    showTip(x, y, tipFor(object));
+  } else if (layer?.id === "hotspots" && object) {
+    changed = state.hoverHs !== object.h.id || state.hoverPt !== null;
+    state.hoverHs = object.h.id;
+    state.hoverPt = null;
+    showTip(x, y, `<b>${escapeHtml(object.h.town)}${object.h.road ? ` · ${object.h.road}` : ""}</b><span>${object.n} collisions · ${Math.round(object.ksi)}% KSI · click to select</span>`);
+  } else if (layer?.id === "hexagons" && object) {
+    showTip(x, y, `<b>${object.n} collisions</b><span>${Math.round(object.ksi)}% killed or seriously injured</span>`);
+  } else {
+    changed = state.hoverPt !== null || state.hoverHs !== null;
+    state.hoverPt = null;
+    state.hoverHs = null;
+    hideTip();
+  }
+  if (changed) {
+    renderRank();
+    scheduleFrame();
+  }
+}
+
+function onClick(info) {
+  const { object, layer } = info;
+  if (layer?.id === "collisions" && object) {
+    const sameLocation = F.filter((r) => r.lon === object.lon && r.lat === object.lat);
+    details.open(object, sameLocation);
+    return;
+  }
+  if (layer?.id === "hotspots" && object) {
+    selectHotspot(object.h.id);
+  }
+}
+
+const deck = new Deck({
+  parent: $("map"),
+  viewState,
+  controller: { doubleClickZoom: false },
+  layers: [basemap],
+  pickingRadius: 5,
+  onViewStateChange: ({ viewState: next }) => {
+    viewState = clampView(next);
+    deck.setProps({ viewState });
+    hideTip();
+    scheduleFrame();
+  },
+  onHover,
+  onClick,
+  getCursor: ({ isDragging, isHovering }) => (isDragging ? "grabbing" : isHovering ? "pointer" : "grab"),
+});
+
 // --------------------------------------------------
-// Linked records are grouped into readable summaries.
-// Less common attributes stay available under More details.
-// Shared collision IDs and GeoJSON provenance are not repeated.
+// Overlay: hotspot numbers, hover label, town names, drawing
 // --------------------------------------------------
-const RECORD_FIELDS = {
-  vehicle: [
-    ["vehicle_type", "Vehicle type"],
-    ["generic_make_model", "Make / model"],
-    ["vehicle_manoeuvre", "Manoeuvre"],
-    ["sex_of_driver", "Driver sex"],
-    ["age_of_driver", "Driver age"],
-    ["journey_purpose_of_driver", "Journey purpose"],
-    ["age_band_of_driver", "Driver age band"],
-    ["age_of_vehicle", "Vehicle age"],
-    ["engine_capacity_cc", "Engine capacity"],
-    ["propulsion_code", "Propulsion"],
-    ["escooter_flag", "E-scooter"],
-    ["first_point_of_impact", "First impact"],
-    ["towing_and_articulation", "Towing / articulation"],
-    ["skidding_and_overturning", "Skidding / overturning"],
-    ["hit_object_in_carriageway", "Object hit on road"],
-    ["hit_object_off_carriageway", "Object hit off road"],
-    ["junction_location", "Junction location"],
-    ["vehicle_direction_from", "Direction from"],
-    ["vehicle_direction_to", "Direction to"],
-    ["vehicle_leaving_carriageway", "Leaving the road"],
-    ["vehicle_left_hand_drive", "Left-hand drive"],
-    ["vehicle_location_restricted_lane", "Restricted lane"],
-    ["driver_distance_banding", "Driver distance band"],
-    ["driver_imd_decile", "Driver IMD decile"],
-    ["lsoa_of_driver", "Driver LSOA"],
-    ["journey_purpose_of_driver_historic", "Journey purpose (historic)"],
-    ["vehicle_manoeuvre_historic", "Manoeuvre (historic)"],
-    ["vehicle_location_restricted_lane_historic", "Restricted lane (historic)"],
-  ],
-  casualty: [
-    ["casualty_severity", "Injury severity"],
-    ["casualty_class", "Person's role"],
-    ["casualty_type", "Road user type"],
-    ["sex_of_casualty", "Sex"],
-    ["age_of_casualty", "Age"],
-    ["vehicle_reference", "Linked vehicle"],
-    ["age_band_of_casualty", "Age band"],
-    ["enhanced_casualty_severity", "Detailed severity"],
-    ["casualty_injury_based", "Severity reporting"],
-    ["car_passenger", "Car passenger"],
-    ["bus_or_coach_passenger", "Bus / coach passenger"],
-    ["pedestrian_location", "Pedestrian location"],
-    ["pedestrian_movement", "Pedestrian movement"],
-    ["pedestrian_road_maintenance_worker", "Road maintenance worker"],
-    ["casualty_distance_banding", "Distance band"],
-    ["casualty_imd_decile", "IMD decile"],
-    ["lsoa_of_casualty", "LSOA"],
-    ["casualty_adjusted_severity_serious", "Serious severity adjustment"],
-    ["casualty_adjusted_severity_slight", "Slight severity adjustment"],
-  ],
+const overlay = $("overlay");
+const NS = "http://www.w3.org/2000/svg";
+
+function svgEl(tag, attrs, parent, text) {
+  const node = document.createElementNS(NS, tag);
+  for (const key in attrs) node.setAttribute(key, attrs[key]);
+  if (text != null) node.textContent = text;
+  if (parent) parent.appendChild(node);
+  return node;
+}
+
+let drawing = null; // { tool, points: [[x, y], ...] } while drawing a lasso or box
+
+function drawOverlay() {
+  const { width, height } = mapSize();
+  overlay.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  overlay.replaceChildren();
+  const vp = viewport();
+  const land = css("--land");
+
+  // Town names
+  const detailed = viewState.zoom > overviewZoom + 1.5;
+  PLACES.filter((p) => detailed || p.label).forEach((place) => {
+    const [x, y] = vp.project([place.lon, place.lat]);
+    if (x < 0 || y < 20 || x > width || y > height) return;
+    svgEl("text", {
+      x, y: y - 22, "text-anchor": "middle", "font-size": 10.5, "font-weight": 600, "letter-spacing": 1,
+      class: "muted", stroke: land, "stroke-width": 3, "paint-order": "stroke",
+    }, overlay, place.name.replace(" centre", "").toUpperCase());
+  });
+
+  // Hotspot rank numbers (top 10, plus selected / hovered)
+  stats.forEach((s) => {
+    const isA = state.selA?.type === "hotspot" && state.selA.id === s.h.id;
+    const isB = state.selB?.type === "hotspot" && state.selB.id === s.h.id;
+    const hover = state.hoverHs === s.h.id;
+    if (s.rank > 10 && !isA && !isB && !hover) return;
+    const pts = s.h.hull.map((p) => vp.project(p));
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    const bx = Math.max(...xs) + 9;
+    const by = Math.min(...ys) - 7;
+    const color = isA ? css("--sel") : isB ? css("--cmp") : css("--text");
+    svgEl("circle", { cx: bx, cy: by, r: 9, fill: isA || isB ? color : css("--paper"), stroke: color, "stroke-width": 1.4 }, overlay);
+    svgEl("text", { x: bx, y: by + 3.6, "text-anchor": "middle", "font-size": 10, "font-weight": 700, fill: isA || isB ? "#fff" : css("--text") }, overlay, s.rank);
+    if (hover) {
+      svgEl("text", {
+        x: (Math.min(...xs) + Math.max(...xs)) / 2, y: Math.max(...ys) + 16, "text-anchor": "middle", "font-size": 11.5, "font-weight": 650,
+        stroke: land, "stroke-width": 3.5, "paint-order": "stroke",
+      }, overlay, `${s.h.town} · ${s.n} collisions · ${Math.round(s.ksi)}% KSI`);
+    }
+  });
+
+  // Lasso / box being drawn
+  if (drawing && drawing.points.length > 1) {
+    const pts = drawing.tool === "box" ? boxCorners(drawing.points[0], drawing.points[drawing.points.length - 1]) : drawing.points;
+    const colorVar = state.pickB ? "--cmp" : "--sel";
+    svgEl("path", {
+      d: `M${pts.map((p) => p.join(",")).join("L")}${drawing.tool === "box" ? "Z" : ""}`,
+      fill: state.pickB ? css("--cmp-soft") : css("--sel-soft"), stroke: css(colorVar), "stroke-width": 2, "stroke-dasharray": "6 4",
+    }, overlay);
+  }
+}
+
+function boxCorners([x0, y0], [x1, y1]) {
+  return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+}
+
+let frame = 0;
+function scheduleFrame() {
+  if (frame) return;
+  frame = requestAnimationFrame(() => {
+    frame = 0;
+    deck.setProps({ layers: buildLayers() });
+    drawOverlay();
+  });
+}
+
+// Lasso and box drawing happens on the overlay, which only takes
+// pointer events while one of those tools is active.
+function localPoint(event) {
+  const rect = overlay.getBoundingClientRect();
+  return [event.clientX - rect.left, event.clientY - rect.top];
+}
+
+overlay.addEventListener("pointerdown", (event) => {
+  if (state.mode === "select") return;
+  overlay.setPointerCapture(event.pointerId);
+  drawing = { tool: state.mode, points: [localPoint(event)] };
+});
+overlay.addEventListener("pointermove", (event) => {
+  if (!drawing) return;
+  const point = localPoint(event);
+  if (drawing.tool === "box") drawing.points[1] = point;
+  else drawing.points.push(point);
+  drawOverlay();
+});
+overlay.addEventListener("pointerup", (event) => {
+  if (!drawing) return;
+  overlay.releasePointerCapture(event.pointerId);
+  const { tool, points } = drawing;
+  drawing = null;
+  const screen = tool === "box" ? (points[1] ? boxCorners(points[0], points[1]) : null) : points;
+  if (!screen || screen.length < 3) {
+    drawOverlay();
+    return;
+  }
+  const vp = viewport();
+  const poly = screen.map((p) => vp.unproject(p));
+  const ids = P.filter((r) => inPolygon(r.lon, r.lat, poly)).map((r) => r.i);
+  if (!ids.length) {
+    drawOverlay();
+    setNote("No collisions inside that shape. Try drawing a larger area.");
+    return;
+  }
+  const lon = ids.reduce((sum, i) => sum + P[i].lon, 0) / ids.length;
+  const lat = ids.reduce((sum, i) => sum + P[i].lat, 0) / ids.length;
+  state.mode = "select";
+  setSelection({ type: "area", tool, poly, ids, label: `Area near ${nearestPlace(lon, lat).replace(" centre", "")}` });
+});
+
+// --------------------------------------------------
+// Tooltip
+// --------------------------------------------------
+function tipFor(r) {
+  return `<b>${SEVERITY_NAMES[r.sev - 1]} · ${USERS[r.user].toLowerCase()}</b><span>${escapeHtml(r.date)} · ${escapeHtml(r.time)}</span>
+    <dl><dt>Casualties</dt><dd>${r.cas}</dd><dt>Vehicles</dt><dd>${r.veh}</dd>
+    <dt>Speed limit</dt><dd>${r.spd >= 0 ? `${SPEEDS[r.spd]} mph` : "—"}</dd><dt>Light</dt><dd>${LIGHT[r.light]}</dd>
+    <dt>Road</dt><dd>${escapeHtml(r.road)}</dd></dl><span>Click for full details</span>`;
+}
+
+function showTip(x, y, html) {
+  const tip = $("tip");
+  tip.innerHTML = html;
+  tip.hidden = false;
+  const { width, height } = mapSize();
+  tip.style.left = `${Math.max(4, Math.min(x + 14, width - tip.offsetWidth - 8))}px`;
+  tip.style.top = `${Math.max(4, Math.min(y + 14, height - tip.offsetHeight - 8))}px`;
+}
+
+function hideTip() {
+  $("tip").hidden = true;
+}
+
+// --------------------------------------------------
+// Sidebar
+// --------------------------------------------------
+const FILTER_LABEL = {
+  user: (v) => USERS[v],
+  light: (v) => LIGHT[v],
+  wx: (v) => WEATHER[v],
+  spd: (v) => `${SPEEDS[v]} mph`,
+  yr: (v) => String(v),
+  cell: (v) => {
+    const [d, h] = v.split("-");
+    return `${DAYS[d]} ${String(h).padStart(2, "0")}:00`;
+  },
 };
 
-function recordValue(kind, field, value) {
-  const recorded = recordedValue(value);
-  if (recorded === "Not recorded") return recorded;
-  const codes = DETAIL_CODES[kind][field];
-  if (codes) return codes[recorded] || `Unknown code (${recorded})`;
-  if (["age_of_driver", "age_of_casualty", "age_of_vehicle"].includes(field)) return `${recorded} years`;
-  if (field === "engine_capacity_cc") return `${recorded} cc`;
-  if (field === "vehicle_reference") return `Vehicle ${recorded}`;
-  return recorded;
-}
+function renderHeader() {
+  $("kpi-n").textContent = fmt(F.length);
+  const count = Object.values(state.filters).reduce((sum, set) => sum + set.size, 0);
+  $("kpi-sub").textContent = count
+    ? `of ${fmt(P.length)} · ${count} filter${count > 1 ? "s" : ""} active`
+    : "2020 – 2025 · all collisions";
 
-function renderRecordRows(kind, record, fields) {
-  return `<dl class="detail-rows">${fields.map(([field, label]) =>
-    `<div><dt>${label}</dt><dd>${escapeHtml(recordValue(kind, field, record[field]))}</dd></div>`,
-  ).join("")}</dl>`;
-}
+  let html = "";
+  if (state.selA) html += `<span class="chip sel">Area: ${escapeHtml(selName(state.selA))}<button type="button" data-clear="A" aria-label="Clear selected area">×</button></span>`;
+  if (state.selB) html += `<span class="chip cmp">Compare: ${escapeHtml(selName(state.selB))}<button type="button" data-clear="B" aria-label="Clear compared area">×</button></span>`;
+  Object.entries(state.filters).forEach(([key, set]) => set.forEach((value) => {
+    html += `<span class="chip">${escapeHtml(FILTER_LABEL[key](value))}<button type="button" data-unfilter="${key}|${value}" aria-label="Remove filter">×</button></span>`;
+  }));
+  if (count) html += `<span class="chip clear"><button type="button" data-clear-all="1">Clear all filters</button></span>`;
+  $("chips").innerHTML = html;
 
-function updateDetailsTabs() {
-  const p = selectedCollision.properties;
-  detailsPanel.querySelectorAll("[data-details-tab]").forEach((button) => {
-    const kind = button.dataset.detailsTab;
-    const active = kind === activeDetailsTab;
-    const records = selectedRecords[kind];
-    const count = Array.isArray(records) ? records.length
-      : p[kind === "vehicle" ? "number_of_vehicles" : "number_of_casualties"];
-    button.textContent = kind === "collision" ? "Collision"
-      : `${kind === "vehicle" ? "Vehicles" : "Casualties"} (${recordedValue(count)})`;
-    button.setAttribute("aria-selected", String(active));
-    button.tabIndex = active ? 0 : -1;
-  });
-  detailsContent.setAttribute("aria-labelledby", `details-tab-${activeDetailsTab}`);
-}
-
-function renderLinkedRecords(kind) {
-  const records = selectedRecords[kind];
-  const name = kind === "vehicle" ? "vehicle" : "casualty";
-  if (records === null) return `<p class="control-hint" role="status">Loading ${name} records…</p>`;
-  if (records === false) return `<p class="error-message">Could not load ${name} records.</p>
-    <button class="retry-records" type="button" data-retry-records="${kind}">Retry loading ${name} records</button>`;
-  if (records.length === 0) return `<p class="control-hint">No linked ${name} records found in this year's data.</p>`;
-
-  const expected = selectedCollision.properties[kind === "vehicle" ? "number_of_vehicles" : "number_of_casualties"];
-  const mismatch = Number(expected) !== records.length;
-  const hint = kind === "vehicle"
-    ? "All vehicles in this collision, including drivers outside the chosen driver filters."
-    : "Each injured person is listed separately. Injury severity can differ from the overall collision severity.";
-
-  return `<p class="control-hint">${hint}</p>
-    ${mismatch ? `<p class="control-hint">${escapeHtml(expected)} reported in the collision record; ${records.length} linked records available.</p>` : ""}
-    ${records.map((record, index) => {
-      const reference = record[`${kind}_reference`];
-      const title = kind === "vehicle"
-        ? `Vehicle ${recordedValue(reference)} · ${recordValue(kind, "vehicle_type", record.vehicle_type)}`
-        : `Casualty ${recordedValue(reference)} · ${recordValue(kind, "casualty_severity", record.casualty_severity)}`;
-      const subtitle = kind === "vehicle"
-        ? `${recordValue(kind, "sex_of_driver", record.sex_of_driver)} · ${recordValue(kind, "age_of_driver", record.age_of_driver)}`
-        : `${recordValue(kind, "casualty_class", record.casualty_class)} · ${recordValue(kind, "age_of_casualty", record.age_of_casualty)}`;
-      return `<details class="linked-record" ${index === 0 ? "open" : ""}>
-        <summary><strong>${escapeHtml(title)}</strong><span>${escapeHtml(subtitle)}</span></summary>
-        ${renderRecordRows(kind, record, RECORD_FIELDS[kind].slice(0, 6))}
-        <details class="more-record-details"><summary>More ${name} details</summary>
-          ${renderRecordRows(kind, record, RECORD_FIELDS[kind].slice(6))}
-          <p class="control-hint">Not recorded means the source has no usable value. Historic fields use the earlier recording format.
-            IMD is the Index of Multiple Deprivation. LSOA is a small statistical area.
-            ${kind === "casualty" ? "Severity adjustments are statistical weights, not extra casualties or injury diagnoses." : ""}</p>
-        </details>
-      </details>`;
-    }).join("")}`;
-}
-
-function renderCollisionDetails() {
-  if (!selectedCollision) return;
-  const p = selectedCollision.properties;
-  const index = selectedGroup.findIndex((feature) => collisionKey(feature) === collisionKey(selectedCollision));
-  const rows = collisionRows(selectedCollision);
-  updateDetailsTabs();
-
-  detailsContent.innerHTML = `
-    <div class="detail-heading"><span class="detail-year year-${p.collision_year}">${escapeHtml(p.collision_year)}</span>
-      <strong>${escapeHtml(categoryLabel("severity", p.collision_severity))} collision</strong></div>
-    <p class="record-reference">${escapeHtml(p.collision_index)}</p>
-    ${selectedGroup.length > 1 ? `<div class="location-records">
-      <span>${selectedGroup.length} collisions at this location<br><strong>Record ${index + 1} of ${selectedGroup.length}</strong></span>
-      <button type="button" data-record-step="-1" aria-label="Previous collision at this location" ${index === 0 ? "disabled" : ""}>←</button>
-      <button type="button" data-record-step="1" aria-label="Next collision at this location" ${index === selectedGroup.length - 1 ? "disabled" : ""}>→</button>
-    </div>` : ""}
-    ${activeDetailsTab === "collision" ? `<dl class="detail-rows">${rows.map(([name, value]) => `<div><dt>${name}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}
-      <div><dt>Coordinates</dt><dd>${selectedCollision.geometry.coordinates.map((value) => value.toFixed(5)).join(", ")}</dd></div>
-    </dl>` : renderLinkedRecords(activeDetailsTab)}`;
-}
-
-async function loadCollisionRecords(kind, feature, request) {
-  const folder = kind === "vehicle" ? "vehicles" : "casualties";
-  try {
-    const year = feature.properties.collision_year;
-    const data = await fetchGeoJson(`${folder}/calderdale_${folder}_${year}.geojson`, `Could not load ${folder} for ${year}.`);
-    if (request !== detailsRequest) return;
-    // Join within the selected year, then keep each vehicle / casualty separate.
-    selectedRecords[kind] = data.features
-      .filter((record) => record.properties.collision_index === feature.properties.collision_index)
-      .map((record) => record.properties)
-      .sort((a, b) => Number(a[`${kind}_reference`]) - Number(b[`${kind}_reference`]));
-  } catch (error) {
-    if (request !== detailsRequest) return;
-    selectedRecords[kind] = false;
+  if (state.colorBy === "year") {
+    $("key").innerHTML = YEARS.map((year) => `<button type="button" data-year="${year}" aria-pressed="${!state.filters.yr.size || state.filters.yr.has(year)}" title="Click to show only this year; click more years to add them">
+      <span class="dot" style="background:rgb(${YEAR_COLORS[year].join(",")})"></span>${year}</button>`).join("");
+  } else {
+    $("key").innerHTML = SEVERITY_NAMES.map((name, i) => `<span><span class="dot" style="background:rgb(${SEVERITY_RGB[i].join(",")})"></span>${name}</span>`).join("");
   }
-  updateDetailsTabs();
-  if (activeDetailsTab === kind) renderCollisionDetails();
+  document.querySelectorAll("#colorby [data-c]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.c === state.colorBy)));
 }
 
-async function selectCollision(feature, group = null) {
-  const request = ++detailsRequest;
-  selectedCollision = feature;
-  selectedGroup = group || mapFeatures.filter((other) =>
-    other.geometry.coordinates[0] === feature.geometry.coordinates[0] &&
-    other.geometry.coordinates[1] === feature.geometry.coordinates[1],
-  );
-  selectedRecords = { vehicle: null, casualty: null };
-  if (!group) activeDetailsTab = "collision";
-  detailsPanel.hidden = false;
-  detailsContent.scrollTop = 0;
-  renderCollisionDetails();
-  refreshMapLayers();
-  updateLinked();
-
-  await Promise.all(["vehicle", "casualty"].map((kind) => loadCollisionRecords(kind, feature, request)));
+function renderRank() {
+  $("hs-count").textContent = `${stats.length} ${stats.length === 1 ? "area" : "areas"}`;
+  $("rank").innerHTML = stats.map((s) => {
+    const max = Math.max(1, ...s.yrs);
+    const up = s.rising > 0;
+    const line = s.yrs.map((v, j) => `${2 + j * 11},${17 - (v / max) * 13}`).join(" ");
+    const cls = state.selA?.type === "hotspot" && state.selA.id === s.h.id ? "sel"
+      : state.selB?.type === "hotspot" && state.selB.id === s.h.id ? "cmp"
+      : state.hoverHs === s.h.id ? "hov" : "";
+    const trendColor = up ? "var(--risk)" : "var(--muted)";
+    return `<li data-hs="${s.h.id}" class="${cls}" tabindex="0">
+      <span class="rk">${s.rank}</span>
+      <div class="nm">${escapeHtml(s.h.town)}${s.h.road ? ` · ${escapeHtml(s.h.road)}` : ""}
+        <div class="mini"><span><i style="width:${Math.round(s.ksi * 0.55)}px;background:var(--risk)"></i>${Math.round(s.ksi)}% KSI</span>
+        <span><i style="width:${Math.round(s.ped * 0.55)}px;background:var(--muted)"></i>${Math.round(s.ped)}% ped.</span></div></div>
+      <div class="ct">${s.n}<svg width="60" height="20" aria-label="Collisions per year, 2020 to 2025"><polyline points="${line}" fill="none" stroke="${trendColor}" stroke-width="1.5"/>
+        <circle cx="57" cy="${17 - (s.yrs[5] / max) * 13}" r="2" fill="${trendColor}"/></svg></div>
+    </li>`;
+  }).join("") || '<li class="empty"><span class="hint">No hotspot has collisions matching these filters.</span></li>';
+  document.querySelectorAll("#sort [data-sort]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.sort === state.sort)));
 }
 
-function clearCollisionSelection() {
-  detailsRequest++;
-  selectedCollision = null;
-  selectedGroup = [];
-  selectedRecords = { vehicle: null, casualty: null };
-  detailsPanel.hidden = true;
-  updateLinked();
+// --------------------------------------------------
+// Selected-area card
+// --------------------------------------------------
+function renderCard() {
+  const card = $("card");
+  if (!state.selA) {
+    card.className = "card empty";
+    card.innerHTML = `<div class="k">Start here</div><h3>Select an area to see what makes it different</h3>
+      <ol><li>Click a hotspot in the list or on the map, or</li><li>choose <b>Lasso area</b> or <b>Box</b> and draw on the map.</li><li>Click chart bars to filter everything at once.</li></ol>`;
+    return;
+  }
+  card.className = "card";
+  const A = selPoints(state.selA);
+  const B = state.selB ? selPoints(state.selB) : null;
+  const reference = B || F;
+  const referenceLabel = B ? selName(state.selB) : "all matching collisions";
+  const summary = (records) => ({
+    n: records.length,
+    cas: records.reduce((sum, r) => sum + r.cas, 0),
+    k: Math.round(ksiShare(records)),
+    f: records.filter((r) => r.sev === 1).length,
+  });
+  const a = summary(A);
+  const b = B ? summary(B) : null;
+
+  // Profile: share in the area vs the reference, as bars around a dashed line.
+  const rows = PROFILE.map(([label, fn]) => ({ label, v: share(A, fn), r: share(reference, fn) }));
+  const mid = 200;
+  const scale = 2.4;
+  const rowH = 23;
+  let profile = `<svg width="100%" viewBox="0 0 330 ${rows.length * rowH + 6}" role="img" aria-label="Profile compared with ${escapeHtml(referenceLabel)}">
+    <line x1="${mid}" x2="${mid}" y1="0" y2="${rows.length * rowH}" stroke="var(--muted)" stroke-dasharray="2 2"/>`;
+  rows.forEach((row, i) => {
+    const d = row.v - row.r;
+    const y = i * rowH;
+    const w = Math.max(1.5, Math.min(d >= 0 ? 90 : 34, Math.abs(d) * scale));
+    const x = d >= 0 ? mid : mid - w;
+    const fill = d >= 8 ? "var(--risk)" : d <= -8 ? "var(--sel)" : "var(--neutral-bar)";
+    profile += `<text x="0" y="${y + 12}" font-size="11.5">${row.label}</text>
+      <rect x="${x}" y="${y + 3}" width="${w}" height="11" rx="2" fill="${fill}"/>
+      <text x="${d >= 0 ? mid + w + 4 : mid - w - 4}" y="${y + 12.5}" font-size="10.5" font-weight="650" text-anchor="${d >= 0 ? "start" : "end"}">${Math.round(row.v)}%</text>`;
+  });
+  profile += "</svg>";
+
+  const top = [...rows].sort((x, y) => Math.abs(y.v - y.r) - Math.abs(x.v - x.r))[0];
+  const ratio = top.r ? top.v / top.r : 0;
+  const standout = A.length < 5
+    ? "Too few collisions in this area for a reliable profile."
+    : Math.abs(top.v - top.r) < 5
+      ? `This area looks like ${B ? escapeHtml(referenceLabel) : "the rest of Calderdale"}; nothing stands out by more than 5 points.`
+      : `<b>Stands out:</b> ${top.label.toLowerCase()} in ${Math.round(top.v)}% of collisions vs ${Math.round(top.r)}% ${B ? `in ${escapeHtml(referenceLabel)}` : "overall"}${ratio >= 1.6 ? ` (${ratio.toFixed(1)}×)` : ""}.`;
+
+  const stat = (value, label, other) => `<div><b>${value}</b><span>${label}</span>${b ? `<div class="b2">${other}</div>` : ""}</div>`;
+  card.innerHTML = `<div class="k">${state.selA.type === "hotspot" ? "Selected hotspot" : `Selected area · ${state.selA.tool}`}</div>
+    <h3>${escapeHtml(selName(state.selA))}${B ? `<small>compared with ${escapeHtml(referenceLabel)}</small>` : ""}</h3>
+    <div class="stats">
+      ${stat(a.n, "collisions", b?.n)}${stat(a.cas, "casualties", b?.cas)}${stat(`${a.k}%`, "KSI", `${b?.k}%`)}${stat(a.f, "fatal", b?.f)}
+    </div>
+    <div class="prof-h"><span>Compared with ${escapeHtml(referenceLabel)}</span><span>dashed line = ${B ? "compared area" : "average"}</span></div>
+    ${profile}
+    <p class="standout">${standout}</p>
+    <div class="btns">
+      <button type="button" class="btn primary" data-card="table">Show these ${a.n} in a table</button>
+      <button type="button" class="btn" data-card="compare">${state.selB ? "Change comparison" : state.pickB ? "Picking… (Esc to cancel)" : "Compare with…"}</button>
+      <button type="button" class="btn" data-card="zoom">Zoom to area</button>
+      <button type="button" class="btn" data-card="clear">Clear</button>
+    </div>`;
 }
 
-showLabelsInput.addEventListener("change", refreshMapLayers);
-labelField.addEventListener("change", refreshMapLayers);
-document.getElementById("close-details").addEventListener("click", () => {
-  clearCollisionSelection();
-  refreshMapLayers();
+// --------------------------------------------------
+// Records table
+// --------------------------------------------------
+const COLUMNS = [["date", "Date"], ["time", "Time"], ["sev", "Severity"], ["cas", "Casualties"], ["user", "Road user"], ["spd", "Limit"], ["light", "Light"], ["road", "Road"]];
+
+function renderTable() {
+  const drawer = $("drawer");
+  drawer.hidden = !state.drawer || !state.selA;
+  $("map-pane").classList.toggle("has-drawer", !drawer.hidden);
+  if (drawer.hidden) return;
+  const rows = selPoints(state.selA).slice();
+  const { key, dir } = state.tableSort;
+  rows.sort((a, b) => (a[key] > b[key] ? 1 : a[key] < b[key] ? -1 : 0) * dir);
+  $("drawer-title").textContent = `${rows.length} collisions · ${selName(state.selA)}`;
+  $("thead").innerHTML = `<tr>${COLUMNS.map(([k, label]) => `<th><button type="button" data-table-sort="${k}">${label}${k === key ? (dir > 0 ? " ▲" : " ▼") : ""}</button></th>`).join("")}</tr>`;
+  $("tbody").innerHTML = rows.map((r) => `<tr data-record="${r.i}">
+    <td>${escapeHtml(r.date)}</td><td>${escapeHtml(r.time)}</td>
+    <td><span class="dot" style="background:rgb(${SEVERITY_RGB[r.sev - 1].join(",")});margin-right:6px"></span>${SEVERITY_NAMES[r.sev - 1]}</td>
+    <td>${r.cas}</td><td>${USERS[r.user]}</td><td>${r.spd >= 0 ? SPEEDS[r.spd] : "—"}</td><td>${LIGHT[r.light]}</td><td>${escapeHtml(r.road)}</td></tr>`).join("");
+}
+
+// --------------------------------------------------
+// Charts
+// --------------------------------------------------
+function chartContext() {
+  return {
+    records: P,
+    passes,
+    filters: state.filters,
+    selA: selPoints(state.selA),
+    selB: state.selB ? selPoints(state.selB) : null,
+    toggle: toggleFilter,
+    color: css,
+  };
+}
+
+function renderCharts() {
+  const ctx = chartContext();
+  renderRisk($("risk-chart"), ctx, state.riskTab);
+  renderSpeed($("speed-chart"), ctx);
+  renderHeat($("heat-chart"), ctx);
+  document.querySelectorAll("#risk-tab [data-t]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.t === state.riskTab)));
+}
+
+// --------------------------------------------------
+// Notes and tools
+// --------------------------------------------------
+let noteOverride = "";
+function setNote(text) {
+  noteOverride = text;
+  renderNote();
+}
+
+function renderNote() {
+  const note = $("mapnote");
+  note.classList.toggle("alert", state.pickB);
+  note.textContent = noteOverride
+    || (state.pickB ? "Pick a second area to compare: click a hotspot, a row in the list, or draw a lasso or box."
+      : state.mode === "lasso" ? "Drag on the map to draw around an area."
+      : state.mode === "box" ? "Drag on the map to draw a box."
+      : state.hex ? "Hexagon colour = share killed or seriously injured (light → dark). Size = number of collisions."
+      : "Drag to pan, scroll to zoom. Hover a point for a summary, click it for full details. Click a hotspot outline to select it.");
+  noteOverride = "";
+  const A = selPoints(state.selA);
+  $("an-status").textContent = state.selA
+    ? `bars = all matching collisions · blue marks = ${A.length} in ${selName(state.selA)}`
+    : "all matching collisions · select an area to compare it";
+  $("leg-b").hidden = !state.selB;
+  document.querySelectorAll(".tool[data-mode]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === state.mode)));
+  $("hex-button").setAttribute("aria-pressed", String(state.hex));
+  overlay.classList.toggle("drawing", state.mode !== "select");
+}
+
+// --------------------------------------------------
+// Render everything from the state
+// --------------------------------------------------
+function renderAll() {
+  renderHeader();
+  renderRank();
+  renderCard();
+  renderCharts();
+  renderTable();
+  renderNote();
+  scheduleFrame();
+}
+
+function update() {
+  version += 1;
+  recompute();
+  // A shown collision that no longer matches the filters is closed.
+  if (details.isOpen() && !inF.has(details.current().i)) details.close();
+  renderAll();
+}
+
+// --------------------------------------------------
+// Events
+// --------------------------------------------------
+const details = createDetailsPanel((record) => {
+  ringRecord = record;
+  scheduleFrame();
 });
-const detailsTabs = detailsPanel.querySelector(".details-tabs");
-function activateDetailsTab(button) {
-  activeDetailsTab = button.dataset.detailsTab;
-  renderCollisionDetails();
-  detailsContent.scrollTop = 0;
-}
-detailsTabs.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-details-tab]");
-  if (button) activateDetailsTab(button);
+
+document.querySelectorAll(".tool[data-mode]").forEach((button) => button.addEventListener("click", () => {
+  state.mode = button.dataset.mode;
+  hideTip();
+  renderNote();
+}));
+$("hex-button").addEventListener("click", () => {
+  state.hex = !state.hex;
+  hideTip();
+  renderNote();
+  scheduleFrame();
 });
-detailsTabs.addEventListener("keydown", (event) => {
-  const buttons = Array.from(detailsTabs.querySelectorAll("[data-details-tab]"));
-  const index = buttons.indexOf(document.activeElement);
-  if (index < 0 || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+$("sort").addEventListener("click", (event) => {
+  const sort = event.target.closest("[data-sort]")?.dataset.sort;
+  if (!sort) return;
+  state.sort = sort;
+  version += 1;
+  computeHotspotStats();
+  renderRank();
+  scheduleFrame();
+});
+$("colorby").addEventListener("click", (event) => {
+  const colorBy = event.target.closest("[data-c]")?.dataset.c;
+  if (!colorBy) return;
+  state.colorBy = colorBy;
+  version += 1;
+  renderHeader();
+  scheduleFrame();
+});
+$("risk-tab").addEventListener("click", (event) => {
+  const tab = event.target.closest("[data-t]")?.dataset.t;
+  if (!tab) return;
+  state.riskTab = tab;
+  renderCharts();
+});
+$("key").addEventListener("click", (event) => {
+  const year = Number(event.target.closest("[data-year]")?.dataset.year);
+  if (year) toggleFilter("yr", year);
+});
+
+const rank = $("rank");
+rank.addEventListener("click", (event) => {
+  const id = event.target.closest("[data-hs]")?.dataset.hs;
+  if (id != null) selectHotspot(Number(id));
+});
+rank.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const id = event.target.closest("[data-hs]")?.dataset.hs;
+  if (id == null) return;
   event.preventDefault();
-  const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
-    : (index + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) % buttons.length;
-  activateDetailsTab(buttons[next]);
-  buttons[next].focus();
+  selectHotspot(Number(id));
 });
-detailsContent.addEventListener("click", (event) => {
-  const retry = event.target.closest("[data-retry-records]");
-  if (retry) {
-    const kind = retry.dataset.retryRecords;
-    selectedRecords[kind] = null;
-    renderCollisionDetails();
-    loadCollisionRecords(kind, selectedCollision, detailsRequest);
+rank.addEventListener("mouseover", (event) => {
+  const id = event.target.closest("[data-hs]")?.dataset.hs;
+  const value = id == null ? null : Number(id);
+  if (value !== state.hoverHs) {
+    state.hoverHs = value;
+    scheduleFrame();
+  }
+});
+rank.addEventListener("mouseleave", () => {
+  state.hoverHs = null;
+  scheduleFrame();
+});
+
+$("chips").addEventListener("click", (event) => {
+  const clear = event.target.closest("[data-clear]")?.dataset.clear;
+  if (clear === "A") {
+    if (state.selB) {
+      state.selA = state.selB;
+      state.selB = null;
+      state.pickB = false;
+      update();
+    } else {
+      clearSelection();
+    }
     return;
   }
-  const button = event.target.closest("[data-record-step]");
-  if (!button || button.disabled) return;
-  const index = selectedGroup.findIndex((feature) => collisionKey(feature) === collisionKey(selectedCollision));
-  selectCollision(selectedGroup[index + Number(button.dataset.recordStep)], selectedGroup);
+  if (clear === "B") {
+    state.selB = null;
+    update();
+    return;
+  }
+  const remove = event.target.closest("[data-unfilter]")?.dataset.unfilter;
+  if (remove) {
+    const [key, value] = remove.split("|");
+    state.filters[key].delete(key === "cell" ? value : Number(value));
+    update();
+    return;
+  }
+  if (event.target.closest("[data-clear-all]")) {
+    Object.values(state.filters).forEach((set) => set.clear());
+    update();
+  }
 });
+
+$("card").addEventListener("click", (event) => {
+  const action = event.target.closest("[data-card]")?.dataset.card;
+  if (action === "table") {
+    state.drawer = true;
+    renderTable();
+  } else if (action === "compare") {
+    state.pickB = true;
+    state.selB = null;
+    update();
+  } else if (action === "zoom") {
+    zoomToSelection();
+  } else if (action === "clear") {
+    clearSelection();
+  }
+});
+
+$("drawer-close").addEventListener("click", () => {
+  state.drawer = false;
+  renderTable();
+});
+$("thead").addEventListener("click", (event) => {
+  const key = event.target.closest("[data-table-sort]")?.dataset.tableSort;
+  if (!key) return;
+  state.tableSort = { key, dir: state.tableSort.key === key ? -state.tableSort.dir : key === "date" ? -1 : 1 };
+  renderTable();
+});
+$("tbody").addEventListener("mouseover", (event) => {
+  const id = event.target.closest("[data-record]")?.dataset.record;
+  const value = id == null ? null : Number(id);
+  if (value !== state.hoverPt) {
+    state.hoverPt = value;
+    scheduleFrame();
+  }
+});
+$("tbody").addEventListener("mouseleave", () => {
+  state.hoverPt = null;
+  scheduleFrame();
+});
+$("tbody").addEventListener("click", (event) => {
+  const id = event.target.closest("[data-record]")?.dataset.record;
+  if (id == null) return;
+  const record = P[Number(id)];
+  details.open(record, F.filter((r) => r.lon === record.lon && r.lat === record.lat));
+  setView({ longitude: record.lon, latitude: record.lat, zoom: Math.max(viewState.zoom, 16) }, true);
+});
+
+$("zoom-in").addEventListener("click", () => setView({ zoom: viewState.zoom + 1 }, true));
+$("zoom-out").addEventListener("click", () => setView({ zoom: viewState.zoom - 1 }, true));
+$("zoom-home").addEventListener("click", () => fitBounds(COLLISION_BOUNDS));
+
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && selectedCollision) {
-    clearCollisionSelection();
-    refreshMapLayers();
+  if (event.key !== "Escape") return;
+  if (drawing) {
+    drawing = null;
+    drawOverlay();
+  } else if (state.pickB) {
+    state.pickB = false;
+    renderCard();
+    renderNote();
+  } else if (details.isOpen()) {
+    details.close();
+  } else if (state.drawer) {
+    state.drawer = false;
+    renderTable();
+  } else if (state.mode !== "select") {
+    state.mode = "select";
+    renderNote();
   }
 });
 
-// --------------------------------------------------
-// Coordinated analytical views
-// The charts sit beside the map, not on top of it, and are
-// linked to it in three ways:
-//  1. Selecting bars filters the map's points and the other charts.
-//  2. The charts can follow the map's visible area (pan / zoom).
-//  3. Hovering or selecting a point marks its bars in every chart.
-// Each chart's own bars ignore that chart's selection, so the
-// remaining options stay visible and can be added or removed.
-// --------------------------------------------------
-const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const MONTH_LONG = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-const CONDITION_ATTRIBUTES = [
-  ["weather", "Weather"],
-  ["lighting", "Lighting"],
-  ["roadClass", "Road class"],
-  ["roadType", "Road type"],
-];
-
-let conditionKey = "weather";
-let analyticsFrame = 0;
-let lastBoundsKey = "";
-const derivedCache = new WeakMap();
-const chartSelections = { year: new Set(), severity: new Set(), hour: new Set(), month: new Set(), conditions: new Set() };
-
-const chartGrid = document.getElementById("chart-grid");
-const analyticsStatus = document.getElementById("analytics-status");
-const followMapInput = document.getElementById("follow-map");
-const clearChartsButton = document.getElementById("clear-chart-filters");
-
-function codeKey(value) {
-  return value === undefined || value === null || value === "" ? "-1" : String(value);
-}
-
-function conditionCategory() {
-  return CATEGORIES.find((cat) => cat.key === conditionKey);
-}
-
-// Hour and month are read once per collision from the stored time and date.
-function derived(feature) {
-  let values = derivedCache.get(feature);
-  if (!values) {
-    const p = feature.properties;
-    const time = String(p.time ?? "").match(/^(\d{1,2})\s*:/);
-    const date = String(p.date ?? "");
-    const dayFirst = date.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    const yearFirst = date.match(/^(\d{4})-(\d{2})-(\d{2})/);
-    const month = dayFirst ? Number(dayFirst[2]) - 1
-      : yearFirst ? Number(yearFirst[2]) - 1
-      : (Number.isNaN(Date.parse(date)) ? null : new Date(date).getMonth());
-    const hour = time ? Number(time[1]) : null;
-    values = {
-      hour: hour !== null && hour >= 0 && hour <= 23 ? hour : null,
-      month: month !== null && month >= 0 && month <= 11 ? month : null,
-    };
-    derivedCache.set(feature, values);
-  }
-  return values;
-}
-
-function dynamicBins(keyOf, labelOf, order) {
-  const totals = new Map();
-  displayedFeatures.forEach((feature) => {
-    const key = keyOf(feature);
-    totals.set(key, (totals.get(key) || 0) + 1);
-  });
-  const keys = Array.from(totals.keys()).sort(order === "count"
-    ? (a, b) => totals.get(b) - totals.get(a)
-    : (a, b) => Number(a) - Number(b));
-  return keys.map((key) => ({ key, label: labelOf(key) }));
-}
-
-const CHARTS = [
-  {
-    id: "year", title: "Year", kind: "column",
-    keyOf: (f) => String(f.properties.collision_year),
-    bins: () => YEARS.filter((year) => displayedYears.some((result) => result.year === year))
-      .map((year) => ({ key: year, label: year, color: `rgb(${YEAR_COLORS[year].slice(0, 3).join(",")})` })),
-  },
-  {
-    id: "severity", title: "Severity", kind: "row",
-    keyOf: (f) => codeKey(f.properties.collision_severity),
-    bins: () => dynamicBins((f) => codeKey(f.properties.collision_severity), (key) => categoryLabel("severity", key), "code"),
-  },
-  {
-    id: "hour", title: "Time of day", kind: "column",
-    keyOf: (f) => String(derived(f).hour ?? "?"),
-    bins: () => Array.from({ length: 24 }, (_, hour) => ({
-      key: String(hour),
-      label: `${String(hour).padStart(2, "0")}:00 to ${String(hour).padStart(2, "0")}:59`,
-      axis: hour % 3 === 0 ? String(hour) : "",
-    })),
-  },
-  {
-    id: "month", title: "Month", kind: "column",
-    keyOf: (f) => String(derived(f).month ?? "?"),
-    bins: () => MONTH_NAMES.map((name, month) => ({ key: String(month), label: MONTH_LONG[month], axis: name })),
-  },
-  {
-    id: "conditions", title: "Conditions", kind: "row",
-    keyOf: (f) => codeKey(f.properties[conditionCategory().field]),
-    bins: () => dynamicBins(
-      (f) => codeKey(f.properties[conditionCategory().field]),
-      (key) => categoryLabel(conditionKey, key),
-      "count",
-    ),
-  },
-];
-
-function buildAnalytics() {
-  chartGrid.innerHTML = CHARTS.map((chart) => `
-    <article class="chart-card chart-${chart.id}">
-      <header class="chart-head">
-        <h3>${chart.title}</h3>
-        ${chart.id === "conditions" ? `<select id="condition-field" aria-label="Condition shown in chart">
-          ${CONDITION_ATTRIBUTES.map(([key, label]) => `<option value="${key}">${label}</option>`).join("")}
-        </select>` : ""}
-        <button type="button" class="text-button" data-clear-chart="${chart.id}" hidden>Clear</button>
-      </header>
-      <div class="chart-body" data-chart-body="${chart.id}"></div>
-    </article>`).join("");
-}
-
-function passesChartFilters(feature, excludeId = null) {
-  return CHARTS.every((chart) =>
-    chart.id === excludeId || chartSelections[chart.id].size === 0 || chartSelections[chart.id].has(chart.keyOf(feature)));
-}
-
-function currentBounds() {
-  const viewport = deck.getViewports()[0];
-  return viewport ? viewport.getBounds() : null;
-}
-
-function inBounds(feature, bounds) {
-  const [x, y] = feature.geometry.coordinates;
-  return x >= bounds[0] && x <= bounds[2] && y >= bounds[1] && y <= bounds[3];
-}
-
-function countLabel(count) {
-  return `${count.toLocaleString("en-GB")} ${count === 1 ? "collision" : "collisions"}`;
-}
-
-function renderColumns(chart, bins, counts, max) {
-  const selected = chartSelections[chart.id];
-  const showValues = bins.length <= 12;
-  return `<div class="column-chart${selected.size ? " has-selection" : ""}" role="group" aria-label="${escapeHtml(chart.title)}">
-    ${bins.map((bin) => {
-      const count = counts.get(bin.key) || 0;
-      const height = (count / max) * 100;
-      const text = `${bin.label}: ${countLabel(count)}`;
-      return `<button type="button" class="bar bar-col" data-chart="${chart.id}" data-key="${bin.key}"
-          aria-pressed="${selected.has(bin.key)}" aria-label="${escapeHtml(text)}" title="${escapeHtml(text)}"
-          style="--h:${height.toFixed(1)}%${bin.color ? `;--bar:${bin.color}` : ""}">
-        <span class="bar-track"><span class="bar-fill"></span>${showValues ? `<span class="bar-value">${count}</span>` : ""}</span>
-        <span class="bar-axis">${escapeHtml(bin.axis ?? bin.label)}</span>
-      </button>`;
-    }).join("")}
-  </div>`;
-}
-
-function renderRows(chart, bins, counts, max) {
-  const selected = chartSelections[chart.id];
-  return `<ul class="row-chart${selected.size ? " has-selection" : ""}" aria-label="${escapeHtml(chart.title)}">
-    ${bins.map((bin) => {
-      const count = counts.get(bin.key) || 0;
-      const text = `${bin.label}: ${countLabel(count)}`;
-      return `<li><button type="button" class="bar bar-row" data-chart="${chart.id}" data-key="${bin.key}"
-          aria-pressed="${selected.has(bin.key)}" aria-label="${escapeHtml(text)}" title="${escapeHtml(text)}"
-          style="--w:${((count / max) * 100).toFixed(1)}%">
-        <span class="row-label">${escapeHtml(bin.label)}</span>
-        <span class="row-track"><span class="row-fill"></span></span>
-        <span class="row-count">${count.toLocaleString("en-GB")}</span>
-      </button></li>`;
-    }).join("")}
-  </ul>`;
-}
-
-function renderAnalytics() {
-  const hasData = displayedFeatures.length > 0;
-  const bounds = hasData && followMapInput.checked ? currentBounds() : null;
-  lastBoundsKey = bounds ? bounds.map((value) => value.toFixed(5)).join() : "";
-  const inView = (feature) => !bounds || inBounds(feature, bounds);
-
-  CHARTS.forEach((chart) => {
-    const body = chartGrid.querySelector(`[data-chart-body="${chart.id}"]`);
-    chartGrid.querySelector(`[data-clear-chart="${chart.id}"]`).hidden = chartSelections[chart.id].size === 0;
-
-    if (!hasData) {
-      body.innerHTML = `<p class="chart-empty">${displayedYears.length > 0 ? "No collisions to chart." : "Apply a year selection to see this chart."}</p>`;
-      return;
-    }
-
-    const counts = new Map();
-    displayedFeatures.forEach((feature) => {
-      if (inView(feature) && passesChartFilters(feature, chart.id)) {
-        const key = chart.keyOf(feature);
-        counts.set(key, (counts.get(key) || 0) + 1);
-      }
-    });
-    const bins = chart.bins();
-    const max = Math.max(1, ...bins.map((bin) => counts.get(bin.key) || 0));
-    body.innerHTML = chart.kind === "column"
-      ? renderColumns(chart, bins, counts, max)
-      : renderRows(chart, bins, counts, max);
-  });
-
-  const activeCharts = Object.values(chartSelections).filter((set) => set.size > 0).length;
-  clearChartsButton.hidden = activeCharts === 0;
-
-  if (!hasData) {
-    analyticsStatus.textContent = displayedYears.length > 0 ? "No collisions match these filters" : "Apply filters to populate the charts";
-  } else {
-    const shown = displayedFeatures.filter((feature) => inView(feature) && passesChartFilters(feature)).length;
-    analyticsStatus.textContent = `${countLabel(shown)}${bounds ? " in the map view" : ""}`
-      + (activeCharts ? ` · ${activeCharts} chart ${activeCharts === 1 ? "filter" : "filters"} active` : "");
-  }
-  updateLinked();
-}
-
-// A hovered or selected collision is marked in every chart.
-function updateLinked() {
-  chartGrid.querySelectorAll(".is-linked").forEach((element) => element.classList.remove("is-linked"));
-  const feature = hoverFeature || selectedCollision;
-  if (!feature) return;
-  CHARTS.forEach((chart) => {
-    chartGrid.querySelector(`.bar[data-chart="${chart.id}"][data-key="${chart.keyOf(feature)}"]`)?.classList.add("is-linked");
-  });
-}
-
-function scheduleAnalyticsUpdate() {
-  if (!followMapInput.checked || displayedFeatures.length === 0 || analyticsFrame) return;
-  analyticsFrame = requestAnimationFrame(() => {
-    analyticsFrame = 0;
-    const bounds = currentBounds();
-    const key = bounds ? bounds.map((value) => value.toFixed(5)).join() : "";
-    if (key !== lastBoundsKey) renderAnalytics();
-  });
-}
-
-function resetChartSelections() {
-  Object.values(chartSelections).forEach((set) => set.clear());
-}
-
-function clearDisplayedData() {
-  displayedYears = [];
-  displayedFeatures = [];
-  mapFeatures = [];
-  pointLayers = [];
-  hoverFeature = null;
-  resetChartSelections();
-}
-
-// Chart selections narrow the points on the map and the other charts.
-function applyChartFilters() {
-  mapFeatures = displayedFeatures.filter((feature) => passesChartFilters(feature));
-  rebuildPointLayers();
-  if (selectedCollision && !mapFeatures.includes(selectedCollision)) {
-    clearCollisionSelection();
-  }
-  refreshMapLayers();
-  updateInfo();
-  renderAnalytics();
-}
-
-function updateInfo() {
-  const info = document.getElementById("info");
-  if (displayedYears.length === 0) {
-    info.innerHTML = `
-        <span class="result-number">—</span>
-        <div class="result-description">
-            <strong>Matching collisions</strong>
-            <span>Select years to begin</span>
-        </div>`;
-    return;
-  }
-  const total = mapFeatures.length;
-  const available = displayedFeatures.length;
-  const years = displayedYears.map((result) => result.year).join(", ");
-  info.innerHTML = `
-        <span class="result-number">${total.toLocaleString("en-GB")}</span>
-        <div class="result-description">
-            <strong>${total === 1 ? "Matching collision" : "Matching collisions"}</strong>
-            <span>${available === 0 ? "No matches for this selection"
-              : total === available ? years
-              : `${total.toLocaleString("en-GB")} of ${available.toLocaleString("en-GB")} after chart filters · ${years}`}</span>
-        </div>`;
-}
-
-chartGrid.addEventListener("click", (event) => {
-  const clear = event.target.closest("[data-clear-chart]");
-  if (clear) {
-    chartSelections[clear.dataset.clearChart].clear();
-    applyChartFilters();
-    return;
-  }
-  const bar = event.target.closest(".bar");
-  if (!bar) return;
-  const { chart, key } = bar.dataset;
-  const selected = chartSelections[chart];
-  if (selected.has(key)) selected.delete(key); else selected.add(key);
-  applyChartFilters();
-  // The chart is redrawn, so return keyboard focus to the same bar.
-  chartGrid.querySelector(`.bar[data-chart="${chart}"][data-key="${key}"]`)?.focus({ preventScroll: true });
-});
-
-chartGrid.addEventListener("change", (event) => {
-  if (event.target.id !== "condition-field") return;
-  conditionKey = event.target.value;
-  chartSelections.conditions.clear();
-  applyChartFilters();
-});
-
-clearChartsButton.addEventListener("click", () => {
-  resetChartSelections();
-  applyChartFilters();
-});
-
-followMapInput.addEventListener("change", renderAnalytics);
-
-buildAnalytics();
-renderAnalytics();
+new ResizeObserver(() => {
+  renderCharts();
+  scheduleFrame();
+}).observe(document.body);
 
 // --------------------------------------------------
-// Deck instance
+// Start-up
 // --------------------------------------------------
-const deck = new Deck({
-  parent: document.getElementById("map"),
-  initialViewState: INITIAL_VIEW_STATE,
-  controller: true,
-  layers: [mapLayer],
-  getTooltip,
-  onViewStateChange: () => {
-    scheduleLabelUpdate();
-    scheduleAnalyticsUpdate();
-  },
-  // Mark the hovered collision in the charts.
-  onHover: ({ object }) => {
-    const feature = object?.properties?.collision_year !== undefined ? object : null;
-    if (feature !== hoverFeature) {
-      hoverFeature = feature;
-      updateLinked();
-    }
-  },
-  onClick: (info) => {
-    // Pick at the click position even if no hover event came first.
-    const object = info.object || deck.pickObject({ x: info.x, y: info.y, radius: 2 })?.object;
-    if (object?.properties) {
-      selectCollision(object);
-    } else {
-      clearCollisionSelection();
-      refreshMapLayers();
-    }
-  },
-});
-
-// Keep the overview limit suitable for the window size.
-// Preserve a closer view when the user has zoomed in.
-function updateOverviewView() {
-  const overview = getOverviewViewState();
-  const current = deck.getViewports()[0];
-  const wasOverview =
-    current.zoom <= deck.props.initialViewState.minZoom + 0.01;
-
-  deck.setProps({
-    initialViewState: wasOverview
-      ? overview
-      : {
-          ...overview,
-          longitude: current.longitude,
-          latitude: current.latitude,
-          zoom: Math.max(current.zoom, overview.minZoom),
-        },
-  });
-  scheduleLabelUpdate();
-  scheduleAnalyticsUpdate();
-}
-
-// The map pane changes size when the window is resized, the filters
-// are hidden or shown, or the charts are rearranged.
-new ResizeObserver(updateOverviewView).observe(document.getElementById("map"));
-
-// Hiding the panel keeps its controls and scroll position intact.
-// Refit only an overview; preserve a closer location when possible.
-const sidebar = document.getElementById("sidebar");
-const showFiltersButton = document.getElementById("show-filters");
-const hideFiltersButton = document.getElementById("hide-filters");
-const collapsedFilterCount = document.getElementById("collapsed-filter-count");
-
-function setFiltersCollapsed(collapsed, moveFocus = true) {
-  sidebar.hidden = collapsed;
-  showFiltersButton.hidden = !collapsed;
-  showFiltersButton.setAttribute("aria-expanded", String(!collapsed));
-  updateOverviewView();
-  if (moveFocus) (collapsed ? showFiltersButton : hideFiltersButton).focus();
-}
-
-hideFiltersButton.addEventListener("click", () => setFiltersCollapsed(true));
-showFiltersButton.addEventListener("click", () => setFiltersCollapsed(false));
-
-// --------------------------------------------------
-// Build the year rows + filter sub-menus
-// --------------------------------------------------
-const yearOptions = document.getElementById("year-options");
-
-function buildYearMenu() {
-  yearOptions.innerHTML = YEARS.map(
-    (year) => `
-        <div class="year-block" data-year="${year}">
-            <div class="year-row">
-                <label class="year-option">
-                    <input type="checkbox" class="year-checkbox" value="${year}" aria-label="${year}">
-                    <span class="color-dot year-${year}"></span>
-                    <span>${year}</span>
-                </label>
-                <button type="button" class="expand-btn year-toggle"
-                        aria-expanded="false"
-                        aria-controls="filters-${year}"
-                        title="Edit filters for ${year}"
-                        aria-label="Filters for ${year}">
-                    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                        <path d="M3 2v12M8 2v12M13 2v12M1 6h4M6 10h4M11 5h4"/>
-                    </svg>
-                </button>
-            </div>
-
-            <div class="sub-menu" id="filters-${year}" hidden>
-                <div class="editor-heading">
-                    <h2>Filters for ${year}</h2>
-                    <span class="filter-count">No filters</span>
-                </div>
-                <p class="control-hint">Filters apply to year ${year} only. Choose any values within a category; chosen categories must all match.</p>
-                ${FILTER_GROUPS.map((group) => `
-                <section class="filter-group" aria-labelledby="group-${year}-${group.source}">
-                    <h3 id="group-${year}-${group.source}">${group.label}</h3>
-                    <p class="control-hint">${group.hint}</p>
-                ${CATEGORIES.filter((cat) => cat.source === group.source).map(
-                  (cat) => `
-                    <div class="category" data-cat="${cat.key}">
-                        <div class="category-row">
-                            <button type="button" class="expand-btn category-toggle"
-                                    aria-expanded="false"
-                                    aria-controls="options-${year}-${cat.key}"
-                                    aria-label="${cat.label} options for ${year}">
-                                <span class="category-name">${cat.label}</span>
-                                <span class="category-summary">Any</span>
-                                <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                                    <path d="M4 6l4 4 4-4"/>
-                                </svg>
-                            </button>
-                        </div>
-
-                        <div class="option-list" id="options-${year}-${cat.key}" hidden>
-                            <label class="category-option">
-                                <input type="checkbox" class="category-checkbox">
-                                <span>Select all options</span>
-                            </label>
-                            ${cat.codes
-                              .map(
-                                (c) => `
-                                <label class="sub-option">
-                                    <input type="checkbox" class="code-checkbox" value="${c.code}">
-                                    <span>${c.label}</span>
-                                </label>
-                            `,
-                              )
-                              .join("")}
-                        </div>
-                    </div>
-                `,
-                ).join("")}
-                </section>`).join("")}
-            </div>
-        </div>
-    `,
-  ).join("");
-}
-
-buildYearMenu();
-
-let appliedSelection = "[]";
-let isApplying = false;
-let displayRequest = 0;
-
-// --------------------------------------------------
-// Read what the user has selected.
-// Returns [{ year, filters: { categoryKey: Set(codes) } }]
-// Categories with nothing ticked are not filtered.
-// --------------------------------------------------
-function getSelections() {
-  return Array.from(yearOptions.querySelectorAll(".year-block"))
-    .filter((block) => block.querySelector(".year-checkbox").checked)
-    .map((block) => {
-      const filters = {};
-
-      block.querySelectorAll(".category").forEach((categoryEl) => {
-        const codes = Array.from(
-          categoryEl.querySelectorAll(".code-checkbox:checked"),
-        ).map((input) => input.value);
-
-        if (codes.length > 0) {
-          filters[categoryEl.dataset.cat] = new Set(codes);
-        }
-      });
-
-      return { year: block.dataset.year, filters };
-    });
-}
-
-// --------------------------------------------------
-// Render selected years
-// --------------------------------------------------
-async function showSelectedYears(selections) {
-  const info = document.getElementById("info");
-  const request = ++displayRequest;
-
-  if (selections.length === 0) {
-    clearDisplayedData();
-    clearCollisionSelection();
-    refreshMapLayers();
-    renderAnalytics();
-
-    info.innerHTML = `
-            <span class="result-number">—</span>
-            <div class="result-description">
-                <strong>Matching collisions</strong>
-                <span>Select years to begin</span>
-            </div>
-        `;
-    appliedSelection = getSelectionSignature(selections);
-    updateFilterStatus();
-    return;
-  }
-
-  const years = selections.map((s) => s.year);
-  isApplying = true;
-  viewButton.disabled = true;
-  info.setAttribute("aria-busy", "true");
-  updateFilterStatus();
-  info.innerHTML = `
-        <span class="result-number loading-dots">…</span>
-        <div class="result-description">
-            <strong>Loading collisions</strong>
-            <span>${years.join(", ")}</span>
-        </div>
-    `;
-
+async function start() {
+  SEVERITY_RGB = [hexToRgb(css("--fatal")), hexToRgb(css("--serious")), hexToRgb(css("--slight"))];
+  setView(overviewView(), false);
   try {
-    const results = await Promise.all(
-      selections.map(async ({ year, filters }) => {
-        const sources = Object.keys(LINKED_SOURCES).filter((source) =>
-          CATEGORIES.some((cat) => cat.source === source && filters[cat.key]),
-        );
-        const [collisions, entries] = await Promise.all([
-          loadYearData(year),
-          Promise.all(sources.map(async (source) => [source, await loadRecordIndex(year, source)])),
-        ]);
-
-        return filterYearFeatures(year, collisions, Object.fromEntries(entries), filters);
-      }),
-    );
-
-    // A reset or a newer request takes priority over an older response.
-    if (request !== displayRequest) {
-      return;
-    }
-
-    // New data starts with no chart selections, so no stale
-    // selection can hide records that have no bar to deselect.
-    resetChartSelections();
-    displayedYears = results;
-    displayedFeatures = results.flatMap((result) => result.features);
-    mapFeatures = displayedFeatures;
-    rebuildPointLayers();
-    clearCollisionSelection();
-    refreshMapLayers();
-    updateInfo();
-    renderAnalytics();
-    appliedSelection = getSelectionSignature(selections);
+    P = await loadAllData((progress) => {
+      $("loading").textContent = `Loading collision data… ${Math.round(progress * 100)}%`;
+    });
   } catch (error) {
-    if (request !== displayRequest) {
-      return;
-    }
-
     console.error(error);
-
-    info.innerHTML = `
-            <p class="error-message">
-                Could not load this selection. The map has not been updated. Try applying again.
-            </p>
-        `;
-  } finally {
-    if (request === displayRequest) {
-      isApplying = false;
-      viewButton.disabled = false;
-      info.setAttribute("aria-busy", "false");
-      updateFilterStatus();
-    }
+    $("loading").textContent = "Could not load the data files. Check that the public/ folders are present and reload the page.";
+    return;
   }
+  HS = findHotspots(P);
+  $("loading").hidden = true;
+  update();
+  // Open in a working state: the highest-risk hotspot selected.
+  if (stats.length) selectHotspot(stats[0].h.id);
 }
 
-// --------------------------------------------------
-// Filter panel behaviour
-// --------------------------------------------------
-const selectedYearsText = document.getElementById("selected-years-text");
-const viewButton = document.getElementById("view-button");
-const clearButton = document.getElementById("clear-button");
-const allYearsButton = document.getElementById("all-years-button");
-const filterStatus = document.getElementById("filter-status");
-
-function getSelectionSignature(selections = getSelections()) {
-  return JSON.stringify(selections, (key, value) =>
-    value instanceof Set ? Array.from(value) : value,
-  );
-}
-
-function updateFilterStatus() {
-  const selections = getSelections();
-  const hasChanges = getSelectionSignature() !== appliedSelection;
-  const count = selections.reduce((total, selection) => total + Object.keys(selection.filters).length, 0);
-  collapsedFilterCount.textContent = count;
-  collapsedFilterCount.hidden = count === 0;
-  showFiltersButton.setAttribute("aria-label", `Show filters${count ? `, ${count} selected filter ${count === 1 ? "category" : "categories"}` : ""}${hasChanges ? ", changes not applied" : ""}`);
-  showFiltersButton.classList.toggle("has-changes", hasChanges);
-  filterStatus.classList.toggle("has-changes", hasChanges && !isApplying);
-
-  if (isApplying) {
-    filterStatus.textContent = "Updating the map…";
-  } else if (hasChanges) {
-    filterStatus.textContent = "Click on Apply filters to update the map";
-  } else if (getSelections().length > 0) {
-    filterStatus.textContent = "Map up to date";
-  } else {
-    filterStatus.textContent = "Choose years to begin";
-  }
-}
-
-function updateSelectedYearsText() {
-  const selectedYears = Array.from(
-    yearOptions.querySelectorAll(".year-checkbox:checked"),
-  ).map((input) => input.value);
-
-  selectedYearsText.textContent = `${selectedYears.length} selected`;
-  allYearsButton.textContent =
-    selectedYears.length === YEARS.length ? "Deselect all" : "Select all";
-  updateFilterStatus();
-}
-
-function updateFilterSummaries() {
-  yearOptions.querySelectorAll(".year-block").forEach((block) => {
-    let activeCount = 0;
-
-    block.querySelectorAll(".category").forEach((category) => {
-      const selected = Array.from(
-        category.querySelectorAll(".code-checkbox:checked"),
-      );
-      const total = category.querySelectorAll(".code-checkbox").length;
-      const summary = category.querySelector(".category-summary");
-
-      category.classList.toggle("is-active", selected.length > 0);
-
-      if (selected.length === 0) {
-        summary.textContent = "Any";
-      } else if (selected.length === total) {
-        summary.textContent = `All ${total} selected`;
-      } else if (selected.length === 1) {
-        summary.textContent = selected[0].nextElementSibling.textContent;
-      } else {
-        summary.textContent = `${selected.length} selected`;
-      }
-
-      summary.title = summary.textContent;
-      activeCount += selected.length > 0 ? 1 : 0;
-    });
-
-    block.querySelector(".filter-count").textContent =
-      activeCount === 0 ? "No filters" : `${activeCount} active`;
-    block
-      .querySelector(".year-toggle")
-      .classList.toggle("has-filters", activeCount > 0);
-  });
-}
-
-// Sync a category checkbox with its option checkboxes
-// (checked = all, indeterminate = some, unchecked = none).
-function syncCategoryCheckbox(categoryEl) {
-  const boxes = Array.from(categoryEl.querySelectorAll(".code-checkbox"));
-  const checkedCount = boxes.filter((box) => box.checked).length;
-  const parent = categoryEl.querySelector(".category-checkbox");
-
-  parent.checked = checkedCount === boxes.length;
-  parent.indeterminate = checkedCount > 0 && checkedCount < boxes.length;
-}
-
-function setExpanded(button, panel, expanded) {
-  panel.hidden = !expanded;
-  button.classList.toggle("expanded", expanded);
-  button.setAttribute("aria-expanded", String(expanded));
-}
-
-function openYearFilters(block) {
-  yearOptions.querySelectorAll(".year-block").forEach((yearBlock) => {
-    const expanded = yearBlock === block;
-    yearBlock.querySelector(".year-row").classList.toggle("editing", expanded);
-    setExpanded(
-      yearBlock.querySelector(".year-toggle"),
-      yearBlock.querySelector(".sub-menu"),
-      expanded,
-    );
-  });
-}
-
-// Keep one year's editor open, with expandable categories inside it.
-yearOptions.addEventListener("click", (event) => {
-  const yearToggle = event.target.closest(".year-toggle");
-  const categoryToggle = event.target.closest(".category-toggle");
-
-  if (yearToggle) {
-    const block = yearToggle.closest(".year-block");
-    const panel = block.querySelector(".sub-menu");
-
-    if (panel.hidden) {
-      openYearFilters(block);
-    } else {
-      setExpanded(yearToggle, panel, false);
-      block.querySelector(".year-row").classList.remove("editing");
-    }
-  } else if (categoryToggle) {
-    const panel = categoryToggle
-      .closest(".category")
-      .querySelector(".option-list");
-    setExpanded(categoryToggle, panel, panel.hidden);
-  }
-});
-
-// Checkbox logic
-yearOptions.addEventListener("change", (event) => {
-  const input = event.target;
-  const block = input.closest(".year-block");
-
-  if (input.classList.contains("year-checkbox") && input.checked) {
-    openYearFilters(block);
-  }
-
-  if (input.classList.contains("category-checkbox")) {
-    // Selecting the category selects every option inside it.
-    const categoryEl = input.closest(".category");
-    categoryEl.querySelectorAll(".code-checkbox").forEach((box) => {
-      box.checked = input.checked;
-    });
-    input.indeterminate = false;
-
-    // Make the options visible when a category gets selected.
-    if (input.checked) {
-      setExpanded(
-        categoryEl.querySelector(".category-toggle"),
-        categoryEl.querySelector(".option-list"),
-        true,
-      );
-    }
-  }
-
-  if (input.classList.contains("code-checkbox")) {
-    syncCategoryCheckbox(input.closest(".category"));
-  }
-
-  // Choosing any filter automatically selects that year.
-  if (
-    (input.classList.contains("category-checkbox") ||
-      input.classList.contains("code-checkbox")) &&
-    block.querySelector(".code-checkbox:checked")
-  ) {
-    block.querySelector(".year-checkbox").checked = true;
-  }
-
-  updateFilterSummaries();
-  updateSelectedYearsText();
-});
-
-viewButton.addEventListener("click", async () => {
-  await showSelectedYears(getSelections());
-});
-
-allYearsButton.addEventListener("click", () => {
-  const boxes = Array.from(yearOptions.querySelectorAll(".year-checkbox"));
-  const selectAll = !boxes.every((box) => box.checked);
-  boxes.forEach((box) => {
-    box.checked = selectAll;
-  });
-  updateSelectedYearsText();
-});
-
-clearButton.addEventListener("click", () => {
-  displayRequest++;
-  isApplying = false;
-  viewButton.disabled = false;
-  appliedSelection = "[]";
-
-  // Uncheck every year, category and option checkbox
-  yearOptions.querySelectorAll('input[type="checkbox"]').forEach((input) => {
-    input.checked = false;
-    input.indeterminate = false;
-  });
-
-  // Collapse the categories and return to the latest year's editor.
-  yearOptions.querySelectorAll(".option-list").forEach((panel) => {
-    panel.hidden = true;
-  });
-  yearOptions.querySelectorAll(".expand-btn").forEach((button) => {
-    button.classList.remove("expanded");
-    button.setAttribute("aria-expanded", "false");
-  });
-
-  openYearFilters(yearOptions.querySelector(".year-block:last-child"));
-  updateFilterSummaries();
-  updateSelectedYearsText();
-
-  // Clear the displayed records, labels and selected collision.
-  clearDisplayedData();
-  clearCollisionSelection();
-  showLabelsInput.checked = false;
-  labelField.value = "severity";
-  refreshMapLayers();
-  renderAnalytics();
-
-  const info = document.getElementById("info");
-  info.setAttribute("aria-busy", "false");
-  info.innerHTML = `
-        <span class="result-number">—</span>
-        <div class="result-description">
-            <strong>Matching collisions</strong>
-            <span>Select years to begin</span>
-        </div>
-    `;
-});
-
-openYearFilters(yearOptions.querySelector(".year-block:last-child"));
-updateFilterSummaries();
-updateSelectedYearsText();
-
-// On narrow screens the filters start hidden so the map and charts come first.
-if (window.matchMedia("(max-width: 800px)").matches) {
-  setFiltersCollapsed(true, false);
-}
+start();
