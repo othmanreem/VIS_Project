@@ -903,6 +903,326 @@ h2 {
     }
 }
 
+/* --------------------------------------------------
+   Concentration overview and a continuous year track.
+   Orange remains the interaction accent; map colours encode data.
+   -------------------------------------------------- */
+#sidebar {
+    max-height: calc(100dvh - 40px);
+}
+.shared-filter-label {
+    pointer-events: none;
+    padding-left: 0;
+    font-size: 12px;
+}
+.shared-filter-label::after {
+    display: none;
+}
+.year-row:has(.shared-filter-label) {
+    display: none;
+}
+#year-options {
+    display: block;
+    margin-top: 0;
+}
+#concentration-toolbar, #time-control {
+    position: absolute;
+    left: 392px;
+    right: 20px;
+    z-index: 5;
+    padding: 16px 20px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--paper);
+    box-shadow: 0 5px 20px rgba(48, 55, 41, 0.07);
+}
+#concentration-toolbar {
+    top: 20px;
+}
+.filters-collapsed #concentration-toolbar {
+    left: 132px;
+}
+.filters-collapsed #time-control {
+    left: 20px;
+}
+.concentration-heading, .time-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.concentration-heading h2 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+}
+.concentration-heading p {
+    margin: 5px 0 0;
+    font-size: 12px;
+    color: #5e665f;
+}
+#inspect-area, .concentration-views button, .time-track button, #open-area-record {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    background: var(--paper);
+    padding: 8px 12px;
+    font-size: 12px;
+}
+#inspect-area:hover, .concentration-views button:hover, .time-track button:hover {
+    background: var(--surface);
+}
+.concentration-views {
+    display: flex;
+    gap: 6px;
+    margin-top: 12px;
+}
+.concentration-views button[aria-pressed="true"] {
+    border-color: var(--accent);
+    background: var(--accent-light);
+    color: var(--accent);
+}
+#concentration-legend {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    margin-top: 12px;
+    font-size: 11px;
+    color: #535c55;
+}
+#concentration-legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+#concentration-legend i {
+    width: 17px;
+    height: 11px;
+    border-radius: 2px;
+}
+#time-control {
+    bottom: 20px;
+}
+.time-heading label, .time-options label {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+}
+#current-year {
+    color: var(--text);
+    font-weight: 600;
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+}
+#time-control select, #area-inspector select {
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 5px 7px;
+    background: var(--paper);
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+    max-width: 100%;
+}
+#time-control select:focus-visible, #area-inspector select:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+}
+.time-track {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+    margin: 14px 0 12px;
+}
+.time-track button {
+    width: 32px;
+    height: 30px;
+    padding: 0;
+    flex-shrink: 0;
+}
+.time-range {
+    flex: 1;
+    min-width: 0;
+}
+#year-slider {
+    --year-progress: 100%;
+    display: block;
+    width: 100%;
+    height: 28px;
+    margin: 0;
+    padding: 0;
+    accent-color: var(--accent);
+    cursor: ew-resize;
+}
+.time-ticks {
+    display: flex;
+    justify-content: space-between;
+    padding: 0 5px;
+    font-size: 11px;
+    color: #626b63;
+    font-variant-numeric: tabular-nums;
+}
+.time-options, #combined-years {
+    display: flex;
+    align-items: center;
+    gap: 10px 20px;
+    flex-wrap: wrap;
+    font-size: 12px;
+}
+.time-options input {
+    accent-color: var(--accent);
+}
+#combined-period summary {
+    cursor: pointer;
+    color: #5e665f;
+}
+#combined-years {
+    padding-top: 10px;
+}
+#temporal-note {
+    margin: 9px 0 0;
+    font-size: 11px;
+    line-height: 1.5;
+    color: #626b63;
+}
+#area-inspector {
+    position: absolute;
+    top: 180px;
+    right: 20px;
+    bottom: 225px;
+    width: 320px;
+    z-index: 6;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--paper);
+    box-shadow: 0 5px 20px rgba(48, 55, 41, 0.10);
+    overflow: hidden;
+}
+#close-area {
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    font-size: 22px;
+}
+.area-body {
+    padding: 14px 18px 18px;
+    overflow-y: auto;
+}
+.area-body > label, .area-body details > label {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 12px;
+}
+#area-choice, #area-record {
+    width: 100%;
+}
+#area-location, #area-history-note {
+    color: #626b63;
+    font-size: 11px;
+    line-height: 1.6;
+}
+#area-result {
+    font-size: 14px;
+    line-height: 1.6;
+    font-variant-numeric: tabular-nums;
+}
+.area-body h3 {
+    font-size: 12px;
+    margin: 18px 0 6px;
+}
+.area-history-row {
+    display: grid;
+    grid-template-columns: 36px 1fr 25px;
+    gap: 10px;
+    align-items: center;
+    padding: 7px 0;
+    font-size: 12px;
+    color: #626b63;
+    font-variant-numeric: tabular-nums;
+}
+.area-history-row.in-period {
+    color: var(--text);
+    font-weight: 600;
+}
+.area-history-row strong {
+    text-align: right;
+    font-weight: inherit;
+}
+.area-history-track {
+    height: 8px;
+    background: var(--surface);
+}
+.area-history-track i {
+    display: block;
+    height: 100%;
+    background: #257391;
+}
+.area-body details {
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+}
+.area-body details summary {
+    cursor: pointer;
+    margin-bottom: 12px;
+}
+#open-area-record {
+    margin-top: 10px;
+    color: var(--accent);
+}
+#time-control button:disabled, #time-control input:disabled, #concentration-toolbar button:disabled, #open-area-record:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+@media (max-width: 1050px) {
+    #concentration-toolbar, #time-control {
+        padding: 12px 14px;
+    }
+    #area-inspector {
+        top: 195px;
+        bottom: 235px;
+        width: 290px;
+    }
+}
+@media (max-width: 700px) {
+    #concentration-toolbar {
+        left: 12px;
+        right: 12px;
+        top: 64px;
+    }
+    .filters-collapsed #concentration-toolbar {
+        left: 12px;
+    }
+    #time-control, .filters-collapsed #time-control {
+        left: 12px;
+        right: 12px;
+        bottom: 12px;
+    }
+    #area-inspector {
+        top: 64px;
+        bottom: 12px;
+        width: calc(100vw - 24px);
+        right: 12px;
+    }
+    .concentration-heading h2 {
+        font-size: 13px;
+    }
+    .concentration-heading p {
+        font-size: 11px;
+    }
+    .time-track {
+        gap: 7px;
+    }
+    .time-heading {
+        gap: 6px;
+    }
+}
+
 @media (max-width: 600px) {
     #show-filters {
         top: 12px;
@@ -946,3 +1266,18 @@ h2 {
         transition: none !important;
     }
 }
+/* Compact temporal navigation; only accumulation fills the track. */
+#time-control, .filters-collapsed #time-control { left: auto; right: 20px; width: min(620px, calc(100vw - 412px)); padding: 12px 16px; }
+.filters-collapsed #time-control { width: min(620px, calc(100vw - 40px)); }
+#temporal-note { display: none; }
+#year-slider { appearance: none; background: transparent; }
+#year-slider::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: #c4cac8; }
+#year-slider.accumulating::-webkit-slider-runnable-track { background: linear-gradient(to right, var(--accent) var(--year-progress), #c4cac8 var(--year-progress)); }
+#year-slider::-webkit-slider-thumb { appearance: none; width: 17px; height: 23px; margin-top: -9px; border: 2px solid var(--paper); border-radius: 4px 4px 9px 9px; background: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+#inspect-area { width: 32px; height: 32px; padding: 0; font-size: 23px; line-height: 1; }
+#concentration-legend .map-scale { width: 240px; max-width: 100%; }
+#concentration-legend .map-scale-colours { display: flex; }
+#concentration-legend .map-scale-colours i { flex: 1; height: 12px; border-radius: 0; }
+#concentration-legend .map-scale-labels { display: flex; margin-top: 3px; }
+#concentration-legend .map-scale-labels span { flex: 1; justify-content: center; }
+@media(max-width:700px) { #time-control, .filters-collapsed #time-control { right:12px; width:calc(100vw - 24px); } }

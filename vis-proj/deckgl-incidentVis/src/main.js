@@ -3,6 +3,7 @@ import { BitmapLayer, GeoJsonLayer, TextLayer } from "@deck.gl/layers";
 import { TileLayer } from "@deck.gl/geo-layers";
 import { CATEGORIES } from "./codes.js";
 import { DETAIL_CODES } from "./detailCodes.js";
+import { createConcentrations } from "./concentrations.js";
 import "./style.css";
 
 // --------------------------------------------------
@@ -26,10 +27,10 @@ function getOverviewViewState() {
     COLLISION_BOUNDS,
     {
       padding: {
-        top: padding,
-        bottom: padding,
+        top: Math.max(padding, document.getElementById("concentration-toolbar").offsetHeight + 40),
+        bottom: Math.max(padding, document.getElementById("time-control").offsetHeight + 40),
         left: sidebar.hidden ? padding : Math.min(sidebar.offsetWidth + 60, width * 0.4),
-        right: padding,
+        right: document.getElementById("area-inspector").hidden ? padding : Math.min(360, width * 0.35),
       },
     },
   );
@@ -203,6 +204,7 @@ let selectedRecords = { vehicle: null, casualty: null };
 let activeDetailsTab = "collision";
 let detailsRequest = 0;
 let labelFrame = 0;
+let concentrations = null;
 
 const showLabelsInput = document.getElementById("show-labels");
 const labelField = document.getElementById("label-field");
@@ -297,7 +299,7 @@ function createYearLayers(year, collisions, indexes, filters) {
     updateTriggers: { getFillColor: [year] },
   });
 
-  return { pointLayer, features };
+  return { year, filters, pointLayer, features };
 }
 
 // --------------------------------------------------
@@ -434,7 +436,7 @@ function createLabelLayer() {
 }
 
 function refreshMapLayers() {
-  const layers = [mapLayer, ...displayedYears.map((result) => result.pointLayer)];
+  const layers = [mapLayer, ...(concentrations ? concentrations.getLayers() : displayedYears.map((result) => result.pointLayer))];
 
   if (selectedCollision) {
     layers.push(new GeoJsonLayer({
@@ -447,7 +449,7 @@ function refreshMapLayers() {
     }));
   }
 
-  const labels = createLabelLayer();
+  const labels = concentrations ? null : createLabelLayer();
   if (labels) layers.push(labels);
   deck.setProps({ layers });
 }
@@ -465,6 +467,7 @@ function scheduleLabelUpdate() {
 // record open and highlights its actual map location.
 // --------------------------------------------------
 function getTooltip({ object }) {
+  if (object?.kind === "concentration") return concentrations.getTooltip(object);
   if (!object?.properties) return null;
   if (selectedCollision && collisionKey(object) === collisionKey(selectedCollision)) return null;
   const p = object.properties;
@@ -731,10 +734,16 @@ const deck = new Deck({
   controller: true,
   layers: [mapLayer],
   getTooltip,
+  onLoad: updateOverviewView,
   onViewStateChange: scheduleLabelUpdate,
   onClick: (info) => {
     // Pick at the click position even if no hover event came first.
     const object = info.object || deck.pickObject({ x: info.x, y: info.y, radius: 2 })?.object;
+    if (object?.kind === "concentration") {
+      clearCollisionSelection();
+      concentrations.selectCell(object);
+      return;
+    }
     if (object?.properties) {
       selectCollision(object);
     } else {
@@ -748,6 +757,10 @@ const deck = new Deck({
 // Preserve a closer view when the user has zoomed in.
 function updateOverviewView() {
   const overview = getOverviewViewState();
+  if (!deck.isInitialized) {
+    deck.setProps({ initialViewState: overview });
+    return;
+  }
   const current = deck.getViewports()[0];
   const wasOverview =
     current.zoom <= deck.props.initialViewState.minZoom + 0.01;
@@ -776,6 +789,7 @@ const collapsedFilterCount = document.getElementById("collapsed-filter-count");
 
 function setFiltersCollapsed(collapsed) {
   sidebar.hidden = collapsed;
+  document.body.classList.toggle("filters-collapsed", collapsed);
   showFiltersButton.hidden = !collapsed;
   showFiltersButton.setAttribute("aria-expanded", String(!collapsed));
   updateOverviewView();
@@ -791,20 +805,19 @@ showFiltersButton.addEventListener("click", () => setFiltersCollapsed(false));
 const yearOptions = document.getElementById("year-options");
 
 function buildYearMenu() {
-  yearOptions.innerHTML = YEARS.map(
+  yearOptions.innerHTML = [YEARS.at(-1)].map(
     (year) => `
         <div class="year-block" data-year="${year}">
             <div class="year-row">
-                <label class="year-option">
-                    <input type="checkbox" class="year-checkbox" value="${year}" aria-label="${year}">
-                    <span class="color-dot year-${year}"></span>
-                    <span>${year}</span>
-                </label>
+                <div class="year-option shared-filter-label">
+                    <input type="checkbox" class="year-checkbox" value="${year}" checked hidden>
+                    <span>Same conditions in all years</span>
+                </div>
                 <button type="button" class="expand-btn year-toggle"
                         aria-expanded="false"
                         aria-controls="filters-${year}"
-                        title="Edit filters for ${year}"
-                        aria-label="Filters for ${year}">
+                        title="Edit shared filters"
+                        aria-label="Edit shared filters">
                     <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
                         <path d="M3 2v12M8 2v12M13 2v12M1 6h4M6 10h4M11 5h4"/>
                     </svg>
@@ -813,10 +826,10 @@ function buildYearMenu() {
 
             <div class="sub-menu" id="filters-${year}" hidden>
                 <div class="editor-heading">
-                    <h2>Filters for ${year}</h2>
+                    <h2>Shared filters</h2>
                     <span class="filter-count">No filters</span>
                 </div>
-                <p class="control-hint">Filters apply to year ${year} only. Choose any values within a category; chosen categories must all match.</p>
+                <p class="control-hint">All years · any value within a category; all chosen categories must match.</p>
                 ${FILTER_GROUPS.map((group) => `
                 <section class="filter-group" aria-labelledby="group-${year}-${group.source}">
                     <h3 id="group-${year}-${group.source}">${group.label}</h3>
@@ -828,7 +841,7 @@ function buildYearMenu() {
                             <button type="button" class="expand-btn category-toggle"
                                     aria-expanded="false"
                                     aria-controls="options-${year}-${cat.key}"
-                                    aria-label="${cat.label} options for ${year}">
+                                    aria-label="${cat.label} options">
                                 <span class="category-name">${cat.label}</span>
                                 <span class="category-summary">Any</span>
                                 <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -875,23 +888,17 @@ let displayRequest = 0;
 // Categories with nothing ticked are not filtered.
 // --------------------------------------------------
 function getSelections() {
-  return Array.from(yearOptions.querySelectorAll(".year-block"))
-    .filter((block) => block.querySelector(".year-checkbox").checked)
-    .map((block) => {
-      const filters = {};
+  const filters = {};
+  yearOptions.querySelectorAll(".category").forEach((categoryEl) => {
+    const codes = Array.from(
+      categoryEl.querySelectorAll(".code-checkbox:checked"),
+    ).map((input) => input.value);
 
-      block.querySelectorAll(".category").forEach((categoryEl) => {
-        const codes = Array.from(
-          categoryEl.querySelectorAll(".code-checkbox:checked"),
-        ).map((input) => input.value);
-
-        if (codes.length > 0) {
-          filters[categoryEl.dataset.cat] = new Set(codes);
-        }
-      });
-
-      return { year: block.dataset.year, filters };
-    });
+    if (codes.length > 0) {
+      filters[categoryEl.dataset.cat] = new Set(codes);
+    }
+  });
+  return YEARS.map((year) => ({ year, filters }));
 }
 
 // --------------------------------------------------
@@ -921,6 +928,7 @@ async function showSelectedYears(selections) {
 
   const years = selections.map((s) => s.year);
   isApplying = true;
+  concentrations?.setBusy(true);
   viewButton.disabled = true;
   info.setAttribute("aria-busy", "true");
   updateFilterStatus();
@@ -953,8 +961,9 @@ async function showSelectedYears(selections) {
     }
 
     displayedYears = results;
-    displayedFeatures = results.flatMap((result) => result.features);
     clearCollisionSelection();
+    concentrations.setData(results);
+    displayedFeatures = concentrations.getFeatures();
     refreshMapLayers();
     const total = displayedFeatures.length;
 
@@ -962,7 +971,7 @@ async function showSelectedYears(selections) {
             <span class="result-number">${total.toLocaleString("en-GB")}</span>
             <div class="result-description">
                 <strong>${total === 1 ? "Matching collision" : "Matching collisions"}</strong>
-                <span>${total === 0 ? "No matches for this selection" : years.join(", ")}</span>
+                <span>${total === 0 ? "No matches for this selection" : concentrations.getYears().join(", ")}</span>
             </div>
         `;
     appliedSelection = getSelectionSignature(selections);
@@ -972,6 +981,7 @@ async function showSelectedYears(selections) {
     }
 
     console.error(error);
+    concentrations?.setBusy(false);
 
     info.innerHTML = `
             <p class="error-message">
@@ -1006,7 +1016,7 @@ function getSelectionSignature(selections = getSelections()) {
 function updateFilterStatus() {
   const selections = getSelections();
   const hasChanges = getSelectionSignature() !== appliedSelection;
-  const count = selections.reduce((total, selection) => total + Object.keys(selection.filters).length, 0);
+  const count = Object.keys(selections[0]?.filters || {}).length;
   collapsedFilterCount.textContent = count;
   collapsedFilterCount.hidden = count === 0;
   showFiltersButton.setAttribute("aria-label", `Show filters${count ? `, ${count} selected filter ${count === 1 ? "category" : "categories"}` : ""}${hasChanges ? ", changes not applied" : ""}`);
@@ -1029,7 +1039,7 @@ function updateSelectedYearsText() {
     yearOptions.querySelectorAll(".year-checkbox:checked"),
   ).map((input) => input.value);
 
-  selectedYearsText.textContent = `${selectedYears.length} selected`;
+  selectedYearsText.textContent = "All years";
   allYearsButton.textContent =
     selectedYears.length === YEARS.length ? "Deselect all" : "Select all";
   updateFilterStatus();
@@ -1205,24 +1215,32 @@ clearButton.addEventListener("click", () => {
   updateSelectedYearsText();
 
   // Clear the displayed records, labels and selected collision.
-  displayedYears = [];
-  displayedFeatures = [];
   clearCollisionSelection();
   showLabelsInput.checked = false;
   labelField.value = "severity";
-  refreshMapLayers();
-
-  const info = document.getElementById("info");
-  info.setAttribute("aria-busy", "false");
-  info.innerHTML = `
-        <span class="result-number">—</span>
-        <div class="result-description">
-            <strong>Matching collisions</strong>
-            <span>Select years to begin</span>
-        </div>
-    `;
+  showSelectedYears(getSelections());
 });
 
 openYearFilters(yearOptions.querySelector(".year-block:last-child"));
 updateFilterSummaries();
 updateSelectedYearsText();
+
+// --------------------------------------------------
+// Temporal exploration reuses the existing filter editor and details.
+// Loading all years once keeps slider movement local and immediate.
+// --------------------------------------------------
+concentrations = createConcentrations({
+  onChange() {
+    if (!concentrations) return;
+    displayedFeatures = concentrations.getFeatures();
+    if (selectedCollision && !displayedFeatures.some((feature) => collisionKey(feature) === collisionKey(selectedCollision))) clearCollisionSelection();
+    if (!isApplying) {
+      document.getElementById("info").innerHTML = `<span class="result-number">${displayedFeatures.length.toLocaleString("en-GB")}</span><div class="result-description"><strong>Matching collisions</strong><span>${concentrations.getYears().join(", ") || "No years chosen"}</span></div>`;
+    }
+    refreshMapLayers();
+  },
+  onCollision: selectCollision,
+  onLayout: updateOverviewView,
+});
+if (window.innerWidth < 900) setFiltersCollapsed(true);
+showSelectedYears(getSelections());

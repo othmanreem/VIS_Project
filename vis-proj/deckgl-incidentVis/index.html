@@ -48,8 +48,8 @@
             <div class="sidebar-body">
                 <div id="year-control">
                     <div class="section-heading">
-                        <h2>Years <span id="selected-years-text">0 selected</span></h2>
-                        <button id="all-years-button" class="text-button" type="button">Select all</button>
+                        <h2>Filter conditions <span id="selected-years-text">All years</span></h2>
+                        <button id="all-years-button" class="text-button" type="button" hidden>Select all</button>
                     </div>
                     <!-- Year choices and their filter editors are generated in main.js. -->
                     <div class="year-options" id="year-options"></div>
@@ -64,9 +64,41 @@
                         <span>Apply filters</span><span aria-hidden="true">↗</span>
                     </button>
                 </div>
-                <p class="legend-caption">Point colours represent years</p>
+                <p class="legend-caption">The same filters apply to every year.</p>
             </div>
         </aside>
+
+        <section id="concentration-toolbar" aria-label="Concentration map">
+            <div class="concentration-heading">
+                <div><h2 id="concentration-title">Recorded collisions · 2025</h2><p id="concentration-scope" role="status">Loading collision records…</p></div>
+                <button id="inspect-area" type="button" aria-controls="area-inspector" aria-expanded="false" title="Inspect an area" aria-label="Inspect an area">⌖</button>
+            </div>
+            <div class="concentration-views" aria-label="Map view">
+                <button id="view-concentrations" type="button" aria-pressed="true">Concentrations</button>
+                <button id="view-change" type="button" aria-pressed="false">Yearly change</button>
+            </div>
+            <div id="concentration-legend" aria-label="Map legend"></div>
+        </section>
+
+        <section id="time-control" aria-label="Explore years">
+            <div class="time-heading">
+                <label for="year-slider">Year <output id="current-year" for="year-slider">2025</output></label>
+                <label id="reference-control" hidden>Compare from <select id="reference-year" aria-label="Reference year"></select></label>
+                <label>Cell width <select id="cell-width" aria-label="Hexagon width"><option value="350">350 m</option><option value="700" selected>700 m</option><option value="1400">1,400 m</option></select></label>
+            </div>
+            <div class="time-track">
+                <button id="previous-year" type="button" aria-label="Previous year">←</button>
+                <div class="time-range"><input id="year-slider" type="range" min="2020" max="2025" step="1" value="2025" aria-label="Map year" list="year-ticks"><datalist id="year-ticks"><option value="2020"></option><option value="2021"></option><option value="2022"></option><option value="2023"></option><option value="2024"></option><option value="2025"></option></datalist><div class="time-ticks" aria-hidden="true"><span>2020</span><span>2021</span><span>2022</span><span>2023</span><span>2024</span><span>2025</span></div></div>
+                <button id="next-year" type="button" aria-label="Next year">→</button>
+            </div>
+            <div class="time-options"><label><input id="accumulate-years" type="checkbox"> Accumulate from 2020</label><details id="combined-period"><summary>Combine chosen years</summary><div id="combined-years" aria-label="Years to combine"></div></details></div>
+            <p id="temporal-note">Counts describe recorded collisions, not road risk.</p>
+        </section>
+
+        <section id="area-inspector" aria-labelledby="area-title" hidden>
+            <div class="details-header"><h2 id="area-title">Selected area</h2><button id="close-area" type="button" aria-label="Close area inspection">×</button></div>
+            <div class="area-body"><label for="area-choice">Location on the grid</label><select id="area-choice"></select><p id="area-location"></p><p id="area-result" role="status"></p><h3>Annual collision counts</h3><div id="area-history"></div><p id="area-history-note"></p><details><summary id="area-record-count">Collision records</summary><label for="area-record">Recorded collision</label><select id="area-record"></select><button id="open-area-record" type="button">Open collision details ↗</button></details></div>
+        </section>
 
         <section id="collision-details" aria-labelledby="details-title" hidden>
             <div class="details-header">
@@ -81,7 +113,7 @@
             <div id="details-content" role="tabpanel" aria-labelledby="details-tab-collision" tabindex="0"></div>
         </section>
 
-        <div id="map-display" role="group" aria-label="Map labels">
+        <div id="map-display" role="group" aria-label="Map labels" hidden>
             <div class="map-display-controls">
                 <label class="label-switch">
                     <input id="show-labels" type="checkbox" role="switch">
