@@ -12,7 +12,7 @@
 //   toggle(filterKey, value), color(cssVar)
 // }
 // --------------------------------------------------
-import { USERS, LIGHT, WEATHER, SPEEDS, DAYS } from "./data.js";
+import { META, USERS, LIGHT, WEATHER, DAYS } from "./data.js";
 
 const NS = "http://www.w3.org/2000/svg";
 
@@ -108,9 +108,10 @@ export function renderRisk(svg, ctx, field) {
   }, svg, `average ${Math.round(avg)}%`);
 }
 
-// "Speed limit risk": KSI share per speed limit.
+// "Speed limit risk": KSI share per speed limit (the limits found in the data).
 export function renderSpeed(svg, ctx) {
   const [w, h] = prepare(svg);
+  const SPEEDS = META.speeds;
   const base = ctx.records.filter((r) => ctx.passes(r, "spd"));
   const groups = SPEEDS.map((_, v) => base.filter((r) => r.spd === v));
   const avg = ksiShare(base);

@@ -1,29 +1,40 @@
 // --------------------------------------------------
 // Data loading
-// All six years of collisions, vehicles and casualties are
-// loaded once at start-up and joined on collision_index, so
-// every view filters in memory and the details panel opens
-// without further requests.
+// Which data to load is described in public/dataset.json
+// (area name, years, file name pattern, hotspot settings), so a
+// different area or period only needs a different settings file.
+// Everything else (map bounds, speed limits, year colours) is
+// derived from the data itself.
+//
+// All years of collisions, vehicles and casualties are loaded once
+// and joined on collision_index, so every view filters in memory.
+// The grouping below follows the STATS19 coding used for all road
+// collisions in Great Britain.
 // --------------------------------------------------
-export const YEARS = [2020, 2021, 2022, 2023, 2024, 2025];
-
-// Year colours (unchanged from the first version of the map).
-export const YEAR_COLORS = {
-  2020: [230, 126, 34],
-  2021: [52, 152, 219],
-  2022: [46, 204, 113],
-  2023: [155, 89, 182],
-  2024: [241, 196, 15],
-  2025: [231, 76, 60],
-};
 
 // Grouped values used by the charts. Index = value stored on each record.
 export const USERS = ["Vehicle occupant", "Pedestrian", "Cyclist", "Motorcyclist"];
 export const LIGHT = ["Daylight", "Dark – lit", "Dark – unlit", "Dark – unknown"];
 export const WEATHER = ["Fine", "Rain", "Snow / fog", "Other / unknown"];
-export const SPEEDS = ["20", "30", "40", "50", "60", "70"];
 export const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 export const SEVERITY_NAMES = ["Fatal", "Serious", "Slight"];
+
+// Filled in by loadAllData() from the settings file and the data.
+export const META = {
+  name: "",
+  years: [], // e.g. [2020, …, 2025]
+  speeds: [], // speed limits present in the data, e.g. ["20", "30", …]
+  bounds: null, // [[minLon, minLat], [maxLon, maxLat]] of all collisions
+  yearColors: {}, // year → [r, g, b]
+  hotspots: { radiusMetres: 120, minCollisions: 10 },
+  useOpenStreetMap: true,
+};
+
+// Year colours, in year order (the first six are the original map colours).
+const YEAR_PALETTE = [
+  [230, 126, 34], [52, 152, 219], [46, 204, 113], [155, 89, 182], [241, 196, 15], [231, 76, 60],
+  [22, 160, 133], [211, 84, 0], [41, 128, 185], [142, 68, 173], [127, 140, 141], [192, 57, 43],
+];
 
 const MOTORCYCLE_TYPES = new Set(["2", "3", "4", "5", "23", "97"]);
 // STATS19 light_conditions → Daylight / Dark lit / Dark unlit / Dark unknown
@@ -34,7 +45,7 @@ const ROAD_PREFIX = { 1: "M", 2: "A", 3: "A", 4: "B" };
 
 const fetchCache = new Map();
 
-export function fetchGeoJson(url) {
+export function fetchJson(url) {
   if (!fetchCache.has(url)) {
     const request = fetch(url)
       .then((response) => {
@@ -91,7 +102,6 @@ function roadOf(props) {
 function toRecord(feature, i, vehicles, casualties) {
   const p = feature.properties;
   const [lon, lat] = feature.geometry.coordinates;
-  const speedIndex = SPEEDS.indexOf(String(p.speed_limit));
   return {
     i,
     feature,
@@ -105,7 +115,7 @@ function toRecord(feature, i, vehicles, casualties) {
     veh: Number(p.number_of_vehicles) || vehicles.length,
     user: roadUserOf(casualties),
     yr: Number(p.collision_year),
-    spd: speedIndex,
+    spd: META.speeds.indexOf(String(p.speed_limit)),
     light: LIGHT_GROUP[p.light_conditions] ?? 3,
     wx: WEATHER_GROUP[p.weather_conditions] ?? 3,
     hr: hourOf(p.time),
@@ -119,21 +129,45 @@ function toRecord(feature, i, vehicles, casualties) {
   };
 }
 
+const fileFor = (pattern, year) => pattern.replaceAll("{year}", String(year));
+
 export async function loadAllData(onProgress = () => {}) {
+  // 1. Settings
+  const config = await fetchJson("dataset.json");
+  META.name = config.name || "Study area";
+  META.years = (config.years || []).map(Number).sort((a, b) => a - b);
+  META.hotspots = {
+    radiusMetres: Number(config.hotspots?.radiusMetres) || 120,
+    minCollisions: Number(config.hotspots?.minCollisions) || 10,
+  };
+  META.useOpenStreetMap = config.placeNames?.useOpenStreetMap !== false;
+  META.years.forEach((year, i) => {
+    META.yearColors[year] = YEAR_PALETTE[i % YEAR_PALETTE.length];
+  });
+
+  // 2. Data files for every year
   let done = 0;
-  const total = YEARS.length * 3;
+  const total = META.years.length * 3;
   const step = (value) => {
     done += 1;
     onProgress(done / total);
     return value;
   };
-
-  const perYear = await Promise.all(YEARS.map((year) => Promise.all([
-    fetchGeoJson(`collisions/calderdale_collisions_${year}.geojson`).then(step),
-    fetchGeoJson(`vehicles/calderdale_vehicles_${year}.geojson`).then(step),
-    fetchGeoJson(`casualties/calderdale_casualties_${year}.geojson`).then(step),
+  const perYear = await Promise.all(META.years.map((year) => Promise.all([
+    fetchJson(fileFor(config.files.collisions, year)).then(step),
+    fetchJson(fileFor(config.files.vehicles, year)).then(step),
+    fetchJson(fileFor(config.files.casualties, year)).then(step),
   ])));
 
+  // 3. Speed limits that actually occur, in numeric order
+  const speeds = new Set();
+  perYear.forEach(([collisions]) => collisions.features.forEach((feature) => {
+    const value = Number(feature.properties?.speed_limit);
+    if (value > 0) speeds.add(String(value));
+  }));
+  META.speeds = [...speeds].sort((a, b) => Number(a) - Number(b));
+
+  // 4. One record per collision, joined with its vehicles and casualties
   const records = [];
   perYear.forEach(([collisions, vehicles, casualties]) => {
     const vehicleIndex = groupByCollision(vehicles.features);
@@ -150,5 +184,17 @@ export async function loadAllData(onProgress = () => {}) {
         ));
       });
   });
+
+  // 5. Map extent of all collisions
+  if (records.length) {
+    const bounds = [[Infinity, Infinity], [-Infinity, -Infinity]];
+    for (const r of records) {
+      bounds[0][0] = Math.min(bounds[0][0], r.lon);
+      bounds[0][1] = Math.min(bounds[0][1], r.lat);
+      bounds[1][0] = Math.max(bounds[1][0], r.lon);
+      bounds[1][1] = Math.max(bounds[1][1], r.lat);
+    }
+    META.bounds = bounds;
+  }
   return records;
 }

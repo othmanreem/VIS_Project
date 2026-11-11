@@ -1,9 +1,9 @@
 import { Deck, WebMercatorViewport, FlyToInterpolator } from "@deck.gl/core";
 import { BitmapLayer, PolygonLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { TileLayer } from "@deck.gl/geo-layers";
-import { YEARS, YEAR_COLORS, USERS, LIGHT, WEATHER, SPEEDS, DAYS, SEVERITY_NAMES, loadAllData } from "./data.js";
+import { META, USERS, LIGHT, WEATHER, DAYS, SEVERITY_NAMES, loadAllData } from "./data.js";
 import { findHotspots, inPolygon } from "./hotspots.js";
-import { PLACES, nearestPlace } from "./places.js";
+import { createPlaceNamer } from "./placeNames.js";
 import { createDetailsPanel, escapeHtml } from "./details.js";
 import { renderRisk, renderSpeed, renderHeat, ksiShare, fmt } from "./charts.js";
 import "./style.css";
@@ -26,7 +26,6 @@ const hexToRgb = (hex) => {
   return [0, 2, 4].map((i) => parseInt(value.slice(i, i + 2), 16));
 };
 
-const COLLISION_BOUNDS = [[-2.17014, 53.625085], [-1.731539, 53.78502]];
 
 // --------------------------------------------------
 // State
@@ -94,13 +93,26 @@ function selPoints(sel) {
   return ids.filter((i) => inF.has(i)).map((i) => P[i]);
 }
 
+// --------------------------------------------------
+// Names: the place name comes from OpenStreetMap (placeNames.js);
+// until it arrives, or if the service is unavailable, the name is
+// built from the data (main road).
+// --------------------------------------------------
+let namer = null;
+const placeName = (position, urgent = false) => (namer ? namer.get(position, urgent) : null);
+
+function hotspotName(h, urgent = false) {
+  const place = placeName(h.centre, urgent);
+  if (place) return h.road ? `${place} · ${h.road}` : place;
+  return h.road ? `${h.road} hotspot` : `Hotspot at ${h.centre[1].toFixed(3)}, ${h.centre[0].toFixed(3)}`;
+}
+
 function selName(sel) {
   if (!sel) return "";
-  if (sel.type === "hotspot") {
-    const h = HS[sel.id];
-    return `${h.town}${h.road ? ` · ${h.road}` : ""}`;
-  }
-  return sel.label;
+  // Selected areas are named first.
+  if (sel.type === "hotspot") return hotspotName(HS[sel.id], true);
+  const place = placeName(sel.centre, true);
+  return place ? `Area near ${place}` : `Drawn area (${sel.ids.length} collisions)`;
 }
 
 function setSelection(sel) {
@@ -126,7 +138,7 @@ function clearSelection() {
   state.pickB = false;
   state.drawer = false;
   update();
-  fitBounds(COLLISION_BOUNDS);
+  fitBounds(META.bounds);
 }
 
 // --------------------------------------------------
@@ -143,17 +155,25 @@ const PROFILE = [
 ];
 const share = (records, fn) => (records.length ? (100 * records.filter(fn).length) / records.length : 0);
 
+function risingOf(yrs) {
+  const n = yrs.length;
+  if (n < 2) return 0;
+  const half = Math.min(2, Math.floor(n / 2));
+  const sum = (from, to) => yrs.slice(from, to).reduce((a, b) => a + b, 0);
+  return sum(n - half, n) - sum(n - 2 * half, n - half);
+}
+
 function computeHotspotStats() {
   const all = HS.map((h) => {
     const members = h.members.filter((i) => inF.has(i)).map((i) => P[i]);
-    const yrs = YEARS.map((year) => members.filter((r) => r.yr === year).length);
+    const yrs = META.years.map((year) => members.filter((r) => r.yr === year).length);
     const k = ksiShare(members);
     return {
       h, n: members.length, ksi: k, ped: share(members, (r) => r.user === 1), yrs,
       // Risk score: more collisions and a higher KSI share rank higher.
       score: members.length * (1 + k / 100),
-      // Rising: collisions in 2024–25 minus 2022–23.
-      rising: (yrs[4] + yrs[5]) - (yrs[2] + yrs[3]),
+      // Rising: collisions in the last two years minus the two years before.
+      rising: risingOf(yrs),
     };
   }).filter((s) => s.n > 0);
   const key = { risk: (s) => -s.score, n: (s) => -s.n, ksi: (s) => -s.ksi, rising: (s) => -s.rising }[state.sort];
@@ -187,26 +207,30 @@ let overviewZoom = 11;
 
 function overviewView() {
   const { width, height } = mapSize();
-  const fit = new WebMercatorViewport({ width, height }).fitBounds(COLLISION_BOUNDS, { padding: Math.min(40, width / 8, height / 8) });
+  const fit = new WebMercatorViewport({ width, height }).fitBounds(META.bounds, { padding: Math.min(40, width / 8, height / 8) });
   overviewZoom = fit.zoom;
   return { longitude: fit.longitude, latitude: fit.latitude, zoom: fit.zoom };
 }
 
-let viewState = { longitude: -1.95, latitude: 53.705, zoom: 11, pitch: 0, bearing: 0 };
+// Neutral start; replaced by the data's own extent once it has loaded.
+let viewState = { longitude: 0, latitude: 30, zoom: 1, pitch: 0, bearing: 0 };
 
 function viewport() {
   const { width, height } = mapSize();
   return new WebMercatorViewport({ ...viewState, width, height });
 }
 
-// Keep the view on Calderdale.
+// Keep the view on the study area (the extent of the collisions, plus a margin).
 function clampView(next) {
-  const minZoom = overviewZoom - 0.6;
+  const bounds = META.bounds;
+  if (!bounds) return next;
+  const marginLon = Math.max(0.02, (bounds[1][0] - bounds[0][0]) * 0.25);
+  const marginLat = Math.max(0.02, (bounds[1][1] - bounds[0][1]) * 0.25);
   return {
     ...next,
-    zoom: Math.max(minZoom, Math.min(18, next.zoom)),
-    longitude: Math.max(COLLISION_BOUNDS[0][0] - 0.1, Math.min(COLLISION_BOUNDS[1][0] + 0.1, next.longitude)),
-    latitude: Math.max(COLLISION_BOUNDS[0][1] - 0.05, Math.min(COLLISION_BOUNDS[1][1] + 0.05, next.latitude)),
+    zoom: Math.max(overviewZoom - 0.6, Math.min(18, next.zoom)),
+    longitude: Math.max(bounds[0][0] - marginLon, Math.min(bounds[1][0] + marginLon, next.longitude)),
+    latitude: Math.max(bounds[0][1] - marginLat, Math.min(bounds[1][1] + marginLat, next.latitude)),
     pitch: 0,
     bearing: 0,
   };
@@ -253,7 +277,7 @@ function zoomToSelection() {
 const pointRadius = () => Math.max(2.4, Math.min(6, 2.4 + (viewState.zoom - overviewZoom) * 0.9));
 
 function pointColor(record) {
-  return state.colorBy === "year" ? YEAR_COLORS[record.yr] : SEVERITY_RGB[record.sev - 1];
+  return state.colorBy === "year" ? (META.yearColors[record.yr] || [128, 128, 128]) : SEVERITY_RGB[record.sev - 1];
 }
 let SEVERITY_RGB = [[122, 26, 20], [216, 73, 43], [242, 154, 91]];
 
@@ -423,7 +447,7 @@ function onHover(info) {
     changed = state.hoverHs !== object.h.id || state.hoverPt !== null;
     state.hoverHs = object.h.id;
     state.hoverPt = null;
-    showTip(x, y, `<b>${escapeHtml(object.h.town)}${object.h.road ? ` · ${object.h.road}` : ""}</b><span>${object.n} collisions · ${Math.round(object.ksi)}% KSI · click to select</span>`);
+    showTip(x, y, `<b>${escapeHtml(hotspotName(object.h))}</b><span>${object.n} collisions · ${Math.round(object.ksi)}% KSI · click to select</span>`);
   } else if (layer?.id === "hexagons" && object) {
     showTip(x, y, `<b>${object.n} collisions</b><span>${Math.round(object.ksi)}% killed or seriously injured</span>`);
   } else {
@@ -489,17 +513,7 @@ function drawOverlay() {
   overlay.replaceChildren();
   const vp = viewport();
   const land = css("--land");
-
-  // Town names
-  const detailed = viewState.zoom > overviewZoom + 1.5;
-  PLACES.filter((p) => detailed || p.label).forEach((place) => {
-    const [x, y] = vp.project([place.lon, place.lat]);
-    if (x < 0 || y < 20 || x > width || y > height) return;
-    svgEl("text", {
-      x, y: y - 22, "text-anchor": "middle", "font-size": 10.5, "font-weight": 600, "letter-spacing": 1,
-      class: "muted", stroke: land, "stroke-width": 3, "paint-order": "stroke",
-    }, overlay, place.name.replace(" centre", "").toUpperCase());
-  });
+  // Town and street names come from the basemap itself, so none are drawn here.
 
   // Hotspot rank numbers (top 10, plus selected / hovered)
   stats.forEach((s) => {
@@ -519,7 +533,7 @@ function drawOverlay() {
       svgEl("text", {
         x: (Math.min(...xs) + Math.max(...xs)) / 2, y: Math.max(...ys) + 16, "text-anchor": "middle", "font-size": 11.5, "font-weight": 650,
         stroke: land, "stroke-width": 3.5, "paint-order": "stroke",
-      }, overlay, `${s.h.town} · ${s.n} collisions · ${Math.round(s.ksi)}% KSI`);
+      }, overlay, `${hotspotName(s.h)} · ${s.n} collisions · ${Math.round(s.ksi)}% KSI`);
     }
   });
 
@@ -588,7 +602,7 @@ overlay.addEventListener("pointerup", (event) => {
   const lon = ids.reduce((sum, i) => sum + P[i].lon, 0) / ids.length;
   const lat = ids.reduce((sum, i) => sum + P[i].lat, 0) / ids.length;
   state.mode = "select";
-  setSelection({ type: "area", tool, poly, ids, label: `Area near ${nearestPlace(lon, lat).replace(" centre", "")}` });
+  setSelection({ type: "area", tool, poly, ids, centre: [lon, lat] });
 });
 
 // --------------------------------------------------
@@ -597,7 +611,7 @@ overlay.addEventListener("pointerup", (event) => {
 function tipFor(r) {
   return `<b>${SEVERITY_NAMES[r.sev - 1]} · ${USERS[r.user].toLowerCase()}</b><span>${escapeHtml(r.date)} · ${escapeHtml(r.time)}</span>
     <dl><dt>Casualties</dt><dd>${r.cas}</dd><dt>Vehicles</dt><dd>${r.veh}</dd>
-    <dt>Speed limit</dt><dd>${r.spd >= 0 ? `${SPEEDS[r.spd]} mph` : "—"}</dd><dt>Light</dt><dd>${LIGHT[r.light]}</dd>
+    <dt>Speed limit</dt><dd>${r.spd >= 0 ? `${META.speeds[r.spd]} mph` : "—"}</dd><dt>Light</dt><dd>${LIGHT[r.light]}</dd>
     <dt>Road</dt><dd>${escapeHtml(r.road)}</dd></dl><span>Click for full details</span>`;
 }
 
@@ -621,7 +635,7 @@ const FILTER_LABEL = {
   user: (v) => USERS[v],
   light: (v) => LIGHT[v],
   wx: (v) => WEATHER[v],
-  spd: (v) => `${SPEEDS[v]} mph`,
+  spd: (v) => `${META.speeds[v]} mph`,
   yr: (v) => String(v),
   cell: (v) => {
     const [d, h] = v.split("-");
@@ -629,12 +643,17 @@ const FILTER_LABEL = {
   },
 };
 
+function yearRange() {
+  const years = META.years;
+  return years.length > 1 ? `${years[0]} – ${years[years.length - 1]}` : String(years[0] ?? "");
+}
+
 function renderHeader() {
   $("kpi-n").textContent = fmt(F.length);
   const count = Object.values(state.filters).reduce((sum, set) => sum + set.size, 0);
   $("kpi-sub").textContent = count
     ? `of ${fmt(P.length)} · ${count} filter${count > 1 ? "s" : ""} active`
-    : "2020 – 2025 · all collisions";
+    : `${yearRange()} · all collisions`;
 
   let html = "";
   if (state.selA) html += `<span class="chip sel">Area: ${escapeHtml(selName(state.selA))}<button type="button" data-clear="A" aria-label="Clear selected area">×</button></span>`;
@@ -646,8 +665,8 @@ function renderHeader() {
   $("chips").innerHTML = html;
 
   if (state.colorBy === "year") {
-    $("key").innerHTML = YEARS.map((year) => `<button type="button" data-year="${year}" aria-pressed="${!state.filters.yr.size || state.filters.yr.has(year)}" title="Click to show only this year; click more years to add them">
-      <span class="dot" style="background:rgb(${YEAR_COLORS[year].join(",")})"></span>${year}</button>`).join("");
+    $("key").innerHTML = META.years.map((year) => `<button type="button" data-year="${year}" aria-pressed="${!state.filters.yr.size || state.filters.yr.has(year)}" title="Click to show only this year; click more years to add them">
+      <span class="dot" style="background:rgb(${META.yearColors[year].join(",")})"></span>${year}</button>`).join("");
   } else {
     $("key").innerHTML = SEVERITY_NAMES.map((name, i) => `<span><span class="dot" style="background:rgb(${SEVERITY_RGB[i].join(",")})"></span>${name}</span>`).join("");
   }
@@ -659,18 +678,19 @@ function renderRank() {
   $("rank").innerHTML = stats.map((s) => {
     const max = Math.max(1, ...s.yrs);
     const up = s.rising > 0;
-    const line = s.yrs.map((v, j) => `${2 + j * 11},${17 - (v / max) * 13}`).join(" ");
+    const stepX = s.yrs.length > 1 ? 55 / (s.yrs.length - 1) : 0;
+    const line = s.yrs.map((v, j) => `${2 + j * stepX},${17 - (v / max) * 13}`).join(" ");
     const cls = state.selA?.type === "hotspot" && state.selA.id === s.h.id ? "sel"
       : state.selB?.type === "hotspot" && state.selB.id === s.h.id ? "cmp"
       : state.hoverHs === s.h.id ? "hov" : "";
     const trendColor = up ? "var(--risk)" : "var(--muted)";
     return `<li data-hs="${s.h.id}" class="${cls}" tabindex="0">
       <span class="rk">${s.rank}</span>
-      <div class="nm">${escapeHtml(s.h.town)}${s.h.road ? ` · ${escapeHtml(s.h.road)}` : ""}
+      <div class="nm">${escapeHtml(hotspotName(s.h))}
         <div class="mini"><span><i style="width:${Math.round(s.ksi * 0.55)}px;background:var(--risk)"></i>${Math.round(s.ksi)}% KSI</span>
         <span><i style="width:${Math.round(s.ped * 0.55)}px;background:var(--muted)"></i>${Math.round(s.ped)}% ped.</span></div></div>
-      <div class="ct">${s.n}<svg width="60" height="20" aria-label="Collisions per year, 2020 to 2025"><polyline points="${line}" fill="none" stroke="${trendColor}" stroke-width="1.5"/>
-        <circle cx="57" cy="${17 - (s.yrs[5] / max) * 13}" r="2" fill="${trendColor}"/></svg></div>
+      <div class="ct">${s.n}<svg width="60" height="20" aria-label="Collisions per year, ${yearRange()}"><polyline points="${line}" fill="none" stroke="${trendColor}" stroke-width="1.5"/>
+        <circle cx="${2 + (s.yrs.length - 1) * stepX}" cy="${17 - (s.yrs[s.yrs.length - 1] / max) * 13}" r="2" fill="${trendColor}"/></svg></div>
     </li>`;
   }).join("") || '<li class="empty"><span class="hint">No hotspot has collisions matching these filters.</span></li>';
   document.querySelectorAll("#sort [data-sort]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.sort === state.sort)));
@@ -725,7 +745,7 @@ function renderCard() {
   const standout = A.length < 5
     ? "Too few collisions in this area for a reliable profile."
     : Math.abs(top.v - top.r) < 5
-      ? `This area looks like ${B ? escapeHtml(referenceLabel) : "the rest of Calderdale"}; nothing stands out by more than 5 points.`
+      ? `This area looks like ${B ? escapeHtml(referenceLabel) : "the rest of ${escapeHtml(META.name)}"}; nothing stands out by more than 5 points.`
       : `<b>Stands out:</b> ${top.label.toLowerCase()} in ${Math.round(top.v)}% of collisions vs ${Math.round(top.r)}% ${B ? `in ${escapeHtml(referenceLabel)}` : "overall"}${ratio >= 1.6 ? ` (${ratio.toFixed(1)}×)` : ""}.`;
 
   const stat = (value, label, other) => `<div><b>${value}</b><span>${label}</span>${b ? `<div class="b2">${other}</div>` : ""}</div>`;
@@ -763,7 +783,7 @@ function renderTable() {
   $("tbody").innerHTML = rows.map((r) => `<tr data-record="${r.i}">
     <td>${escapeHtml(r.date)}</td><td>${escapeHtml(r.time)}</td>
     <td><span class="dot" style="background:rgb(${SEVERITY_RGB[r.sev - 1].join(",")});margin-right:6px"></span>${SEVERITY_NAMES[r.sev - 1]}</td>
-    <td>${r.cas}</td><td>${USERS[r.user]}</td><td>${r.spd >= 0 ? SPEEDS[r.spd] : "—"}</td><td>${LIGHT[r.light]}</td><td>${escapeHtml(r.road)}</td></tr>`).join("");
+    <td>${r.cas}</td><td>${USERS[r.user]}</td><td>${r.spd >= 0 ? META.speeds[r.spd] : "—"}</td><td>${LIGHT[r.light]}</td><td>${escapeHtml(r.road)}</td></tr>`).join("");
 }
 
 // --------------------------------------------------
@@ -990,7 +1010,7 @@ $("tbody").addEventListener("click", (event) => {
 
 $("zoom-in").addEventListener("click", () => setView({ zoom: viewState.zoom + 1 }, true));
 $("zoom-out").addEventListener("click", () => setView({ zoom: viewState.zoom - 1 }, true));
-$("zoom-home").addEventListener("click", () => fitBounds(COLLISION_BOUNDS));
+$("zoom-home").addEventListener("click", () => fitBounds(META.bounds));
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
@@ -1022,17 +1042,28 @@ new ResizeObserver(() => {
 // --------------------------------------------------
 async function start() {
   SEVERITY_RGB = [hexToRgb(css("--fatal")), hexToRgb(css("--serious")), hexToRgb(css("--slight"))];
-  setView(overviewView(), false);
   try {
     P = await loadAllData((progress) => {
       $("loading").textContent = `Loading collision data… ${Math.round(progress * 100)}%`;
     });
   } catch (error) {
     console.error(error);
-    $("loading").textContent = "Could not load the data files. Check that the public/ folders are present and reload the page.";
+    $("loading").textContent = "Could not load the data. Check public/dataset.json and the data files it lists, then reload the page.";
     return;
   }
-  HS = findHotspots(P);
+  if (!P.length) {
+    $("loading").textContent = "The data files contain no collisions with coordinates.";
+    return;
+  }
+  // Area name and period from the settings file.
+  document.title = `IncidentVis · ${META.name} collisions`;
+  $("area-label").textContent = `${META.name} / ${yearRange()}`;
+  $("zoom-home").setAttribute("aria-label", `Show all of ${META.name}`);
+
+  namer = createPlaceNamer({ enabled: META.useOpenStreetMap, onName: () => renderAll() });
+  HS = findHotspots(P, META.hotspots);
+  setView(overviewView(), false);
+  $("hs-hint").textContent = `Dense collision areas, found automatically (DBSCAN: at least ${META.hotspots.minCollisions} collisions within ${META.hotspots.radiusMetres} m). Hover a row to find it on the map. Click to select it.`;
   $("loading").hidden = true;
   update();
   // Open in a working state: the highest-risk hotspot selected.

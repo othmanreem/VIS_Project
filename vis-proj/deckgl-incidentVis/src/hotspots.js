@@ -1,28 +1,28 @@
 // --------------------------------------------------
 // Hotspot detection with DBSCAN.
-// EPS     = search radius in metres
-// MIN_PTS = collisions (including itself) needed within EPS
-//           for a collision to be a dense "core" point.
-// Core points closer than EPS are chained into one hotspot,
+// eps    = search radius in metres
+// minPts = collisions (including itself) needed within eps
+//          for a collision to be a dense "core" point.
+// Both come from public/dataset.json (hotspots.radiusMetres and
+// hotspots.minCollisions).
+// Core points closer than eps are chained into one hotspot,
 // with their neighbours as border points. Everything else is
 // not part of any hotspot.
 // Coordinates are converted to local metres first, so the
-// distances are real distances on the ground.
+// distances are real distances on the ground. The conversion uses
+// the data's own average latitude, so it works for any area.
 // --------------------------------------------------
-import { nearestPlace } from "./places.js";
-
-export const EPS = 120;
-export const MIN_PTS = 10;
-
 const METRES_PER_DEG_LAT = 110540;
-const METRES_PER_DEG_LON = 111320 * Math.cos((53.7 * Math.PI) / 180);
 
-function toMetres(record) {
-  return [record.lon * METRES_PER_DEG_LON, record.lat * METRES_PER_DEG_LAT];
+// Local metres: x = east, y = north.
+function projector(records) {
+  const meanLat = records.reduce((sum, r) => sum + r.lat, 0) / Math.max(1, records.length);
+  const metresPerDegLon = 111320 * Math.cos((meanLat * Math.PI) / 180);
+  return (record) => [record.lon * metresPerDegLon, record.lat * METRES_PER_DEG_LAT];
 }
 
-export function dbscan(records, eps = EPS, minPts = MIN_PTS) {
-  const points = records.map(toMetres);
+export function dbscan(records, eps, minPts) {
+  const points = records.map(projector(records));
   // Grid with cell size eps: neighbours can only be in the 3 × 3 cells around a point.
   const grid = new Map();
   points.forEach(([x, y], i) => {
@@ -92,9 +92,10 @@ export function convexHull(positions) {
   return lower.concat(upper);
 }
 
-// Hotspots from all records: members (record indices), outline, name and main road.
-export function findHotspots(records) {
-  const labels = dbscan(records);
+// Hotspots from all records: members (record indices), outline, centre and main road.
+// Names are added afterwards from the centre (see placeNames.js).
+export function findHotspots(records, { radiusMetres, minCollisions }) {
+  const labels = dbscan(records, radiusMetres, minCollisions);
   const groups = new Map();
   labels.forEach((label, i) => {
     if (label < 0) return;
@@ -114,7 +115,7 @@ export function findHotspots(records) {
       id,
       members: members.map((r) => r.i),
       hull: convexHull(members.map((r) => r.position)),
-      town: nearestPlace(lon, lat),
+      centre: [lon, lat],
       road,
     };
   });

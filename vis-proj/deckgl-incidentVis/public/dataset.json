@@ -1,0 +1,16 @@
+{
+  "name": "Calderdale",
+  "years": [2020, 2021, 2022, 2023, 2024, 2025],
+  "files": {
+    "collisions": "collisions/calderdale_collisions_{year}.geojson",
+    "vehicles": "vehicles/calderdale_vehicles_{year}.geojson",
+    "casualties": "casualties/calderdale_casualties_{year}.geojson"
+  },
+  "hotspots": {
+    "radiusMetres": 120,
+    "minCollisions": 10
+  },
+  "placeNames": {
+    "useOpenStreetMap": true
+  }
+}
