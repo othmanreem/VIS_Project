@@ -1,4 +1,4 @@
-import { Deck, WebMercatorViewport, FlyToInterpolator } from "@deck.gl/core";
+import { Deck, WebMercatorViewport } from "@deck.gl/core";
 import { BitmapLayer, PolygonLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { TileLayer } from "@deck.gl/geo-layers";
 import { META, USERS, LIGHT, WEATHER, DAYS, SEVERITY_NAMES, loadAllData } from "./data.js";
@@ -7,6 +7,8 @@ import { createPlaceNamer } from "./placeNames.js";
 import { createDetailsPanel, escapeHtml } from "./details.js";
 import { renderRisk, renderSpeed, renderHeat, ksiShare, fmt } from "./charts.js";
 import "./style.css";
+import { buildConcentrations, compareConcentrations } from "./concentrations.js";
+import { temporalControls, temporalList, differenceWords, selectedYearWords, temporalLegend } from "./temporal.js";
 
 // ==================================================
 // Hotspot explorer
@@ -36,8 +38,9 @@ const state = {
   selB: null, // second area for comparison
   pickB: false, // waiting for the user to pick the second area
   mode: "select", // select | lasso | box
-  hex: false,
-  colorBy: "year",
+  hex: true,
+  temporal: { mode:"compare", from:2020, to:2025, size:500, years:new Set([2025]) },
+  colorBy: "sev",
   sort: "risk",
   riskTab: "user",
   hoverHs: null,
@@ -48,6 +51,7 @@ const state = {
 
 let P = []; // all collision records
 let HS = []; // hotspots
+let geographicalHexagons=[], temporalData=[], temporalRank=[], temporalTotals=[], temporalAnnualMax=1, temporalCountMax=1;
 let F = []; // records passing the filters
 const inF = new Set(); // indices of F
 let stats = []; // ranked hotspot statistics for the current filters
@@ -75,6 +79,7 @@ function recompute() {
   F.forEach((record) => inF.add(record.i));
   drawOrder = F.slice().sort((a, b) => b.sev - a.sev);
   computeHotspotStats();
+  computeTemporalStats();
 }
 
 function toggleFilter(key, value) {
@@ -82,6 +87,37 @@ function toggleFilter(key, value) {
   if (set.has(value)) set.delete(value);
   else set.add(value);
   update();
+}
+
+function computeTemporalStats() {
+  if (!geographicalHexagons.length) return;
+  const bins=geographicalHexagons.map(b=>({...b, counts:META.years.map(y=>b.members.reduce((sum,i)=>sum+(P[i].yr===y&&passes(P[i],"yr")?1:0),0))}));
+  const t=state.temporal, result=compareConcentrations(bins,META.years,t.from,t.to);
+  temporalTotals=result.totals;
+  temporalAnnualMax=Math.max(1,...result.rows.flatMap(b=>b.counts));
+  temporalCountMax=t.years.size===1?temporalAnnualMax:Math.max(1,...result.rows.map(b=>META.years.reduce((sum,y,i)=>sum+(t.years.has(y)?b.counts[i]:0),0)));
+  temporalData=result.rows.map(b=>({...b,before:b.counts[META.years.indexOf(t.from)],after:t.mode==="compare"?b.counts[META.years.indexOf(t.to)]:META.years.reduce((sum,y,i)=>sum+(t.years.has(y)?b.counts[i]:0),0)})).filter(b=>t.mode==="compare"?b.before||b.after:b.after);
+  const deltaMax=Math.max(1,...temporalData.map(b=>Math.abs(b.delta)));
+  const countRamp=[[245,222,178],[223,174,106],[193,124,57],[149,82,35],[102,48,24]];
+  // Store colours with this data snapshot. GPU accessors must not read a later
+  // mode/filter state while an earlier layer is being updated or finalized.
+  temporalData=temporalData.map(b=>({...b,fill:t.mode==="year"
+    ?countRamp[Math.min(4,Math.floor(b.after/temporalCountMax*4.999))].concat(220)
+    :b.delta===0?[160,164,154,100]:(b.delta>0?[180,81,38]:[43,105,153]).concat(Math.round(90+150*Math.abs(b.delta)/deltaMax))}));
+  const more=temporalData.filter(b=>b.delta>0).sort((a,b)=>b.delta-a.delta||b.after-a.after);
+  const fewer=temporalData.filter(b=>b.delta<0).sort((a,b)=>a.delta-b.delta||b.before-a.before);
+  temporalRank=t.mode==="year"?[...temporalData].sort((a,b)=>b.after-a.after).slice(0,6)
+    :[...more.slice(0,3),...fewer.slice(0,3)];
+  if(!temporalRank.length)temporalRank=[...temporalData].sort((a,b)=>b.after-a.after).slice(0,6);
+}
+function hexName(bin,urgent=false) {
+  const place=placeName(bin.centre,urgent);
+  return place ? `${place}${bin.road?` · ${bin.road}`:""}` : bin.road ? `Near ${bin.road}` : "Local roads";
+}
+function selectHex(id) {
+  const bin=geographicalHexagons.find(b=>b.id===id);
+  if(!bin)return;
+  setSelection({type:"area",tool:"hexagon",hexId:id,poly:bin.polygon,ids:bin.members,centre:bin.centre,label:hexName(bin,true)});
 }
 
 // --------------------------------------------------
@@ -109,6 +145,7 @@ function hotspotName(h, urgent = false) {
 
 function selName(sel) {
   if (!sel) return "";
+  if (sel.label) return sel.label;
   // Selected areas are named first.
   if (sel.type === "hotspot") return hotspotName(HS[sel.id], true);
   const place = placeName(sel.centre, true);
@@ -166,7 +203,10 @@ function risingOf(yrs) {
 function computeHotspotStats() {
   const all = HS.map((h) => {
     const members = h.members.filter((i) => inF.has(i)).map((i) => P[i]);
-    const yrs = META.years.map((year) => members.filter((r) => r.yr === year).length);
+    // Keep annual context when one year is selected. Other filters still apply;
+    // excluded years must not become artificial zeros in the trend.
+    const annualMembers = h.members.map((i) => P[i]).filter((r) => passes(r, "yr"));
+    const yrs = META.years.map((year) => annualMembers.filter((r) => r.yr === year).length);
     const k = ksiShare(members);
     return {
       h, n: members.length, ksi: k, ped: share(members, (r) => r.user === 1), yrs,
@@ -214,6 +254,7 @@ function overviewView() {
 
 // Neutral start; replaced by the data's own extent once it has loaded.
 let viewState = { longitude: 0, latitude: 30, zoom: 1, pitch: 0, bearing: 0 };
+let cameraFrame = 0;
 
 function viewport() {
   const { width, height } = mapSize();
@@ -237,15 +278,35 @@ function clampView(next) {
 }
 
 function setView(next, animate) {
+  cancelAnimationFrame(cameraFrame);
+  cameraFrame=0;
   const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  viewState = clampView({
+  const target = clampView({
     ...viewState,
     ...next,
-    transitionDuration: animate && !reduce ? 600 : 0,
-    transitionInterpolator: animate && !reduce ? new FlyToInterpolator() : undefined,
+    transitionDuration: 0,
+    transitionInterpolator: undefined,
   });
-  deck.setProps({ viewState });
-  scheduleFrame();
+  const apply = camera => {
+    viewState=camera;
+    deck.setProps({viewState});
+    hideTip();
+    scheduleFrame();
+  };
+  if(!animate||reduce){apply(target);return;}
+  // One interruptible camera animation. A second selection starts from the
+  // currently displayed camera, without restarting deck.gl's transition loop.
+  const start={...viewState}, started=performance.now();
+  const step=now=>{
+    const t=Math.min(1,(now-started)/650);
+    const eased=t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;
+    apply({...target,
+      longitude:start.longitude+(target.longitude-start.longitude)*eased,
+      latitude:start.latitude+(target.latitude-start.latitude)*eased,
+      zoom:start.zoom+(target.zoom-start.zoom)*eased});
+    cameraFrame=t<1?requestAnimationFrame(step):0;
+  };
+  cameraFrame=requestAnimationFrame(step);
 }
 
 function fitBounds(bounds, animate = true) {
@@ -277,55 +338,11 @@ function zoomToSelection() {
 const pointRadius = () => Math.max(2.4, Math.min(6, 2.4 + (viewState.zoom - overviewZoom) * 0.9));
 
 function pointColor(record) {
-  return state.colorBy === "year" ? (META.yearColors[record.yr] || [128, 128, 128]) : SEVERITY_RGB[record.sev - 1];
+  return state.hex || state.colorBy === "sev" ? SEVERITY_RGB[record.sev - 1] : (META.yearColors[record.yr] || [128, 128, 128]);
 }
 let SEVERITY_RGB = [[122, 26, 20], [216, 73, 43], [242, 154, 91]];
 
-// Hexagons are binned in screen space so they keep a constant size on screen.
-const HEX_RAMP = [[243, 217, 194], [234, 176, 132], [221, 134, 83], [194, 88, 45], [138, 42, 28]];
-
-function hexBins() {
-  const vp = viewport();
-  const R = 15;
-  const { width, height } = mapSize();
-  const bins = new Map();
-  for (const record of F) {
-    const [x, y] = vp.project(record.position);
-    if (x < -R || y < -R || x > width + R || y > height + R) continue;
-    const q = ((x * Math.sqrt(3)) / 3 - y / 3) / R;
-    const r = ((y * 2) / 3) / R;
-    let rx = Math.round(q);
-    let rz = Math.round(r);
-    const ry = Math.round(-q - r);
-    const dx = Math.abs(rx - q);
-    const dz = Math.abs(rz - r);
-    const dy = Math.abs(ry + q + r);
-    if (dx > dy && dx > dz) rx = -ry - rz;
-    else if (dz > dy) rz = -rx - ry;
-    const key = `${rx},${rz}`;
-    if (!bins.has(key)) bins.set(key, { q: rx, r: rz, records: [] });
-    bins.get(key).records.push(record);
-  }
-  const max = Math.max(1, ...[...bins.values()].map((b) => b.records.length));
-  const selected = new Set(selPoints(state.selA).map((r) => r.i));
-  return [...bins.values()].map((bin) => {
-    const cx = Math.sqrt(3) * R * (bin.q + bin.r / 2);
-    const cy = 1.5 * R * bin.r;
-    const size = R * (0.45 + 0.55 * Math.sqrt(bin.records.length / max));
-    const polygon = [];
-    for (let i = 0; i < 6; i++) {
-      const angle = (Math.PI / 180) * (60 * i - 30);
-      polygon.push(vp.unproject([cx + size * Math.cos(angle), cy + size * Math.sin(angle)]));
-    }
-    return {
-      polygon,
-      n: bin.records.length,
-      ksi: ksiShare(bin.records),
-      inSelection: selected.size > 0 && bin.records.some((r) => selected.has(r.i)),
-    };
-  });
-}
-
+// Fixed geographical hexagons; zoom and pan never change membership.
 let ringRecord = null; // collision shown in the details panel
 
 function buildLayers() {
@@ -340,13 +357,16 @@ function buildLayers() {
 
   if (state.hex) {
     layers.push(new PolygonLayer({
-      id: "hexagons",
-      data: hexBins(),
+      // Different identities prevent polygon tessellation/colour buffers from
+      // being reused between the count and year-difference representations.
+      id: state.temporal.mode==="compare" ? "hexagons-compare" : "hexagons-selected-years",
+      data: temporalData,
       getPolygon: (d) => d.polygon,
-      getFillColor: (d) => HEX_RAMP[Math.min(4, Math.floor(d.ksi / 12))].concat(anySelection && !d.inSelection ? 90 : 240),
+      getFillColor: (d) => d.fill,
       stroked: true,
-      getLineColor: (d) => (d.inSelection ? selRgb : [255, 254, 250]),
-      getLineWidth: (d) => (d.inSelection ? 2 : 0.8),
+      getLineColor: (d) => (state.selA?.hexId===d.id ? selRgb : [255, 254, 250,180]),
+      getLineWidth: (d) => (state.selA?.hexId===d.id ? 2.5 : 0.65),
+      updateTriggers:{getFillColor:version,getLineColor:version,getLineWidth:version},
       lineWidthUnits: "pixels",
       pickable: true,
     }));
@@ -355,7 +375,7 @@ function buildLayers() {
   // Hotspot outlines (also the click / hover target for a hotspot).
   layers.push(new PolygonLayer({
     id: "hotspots",
-    data: hotspotPolygons,
+    data: state.hex ? [] : hotspotPolygons,
     getPolygon: (s) => s.h.hull,
     filled: true,
     getFillColor: (s) => {
@@ -394,12 +414,14 @@ function buildLayers() {
     }));
   }
 
-  if (!state.hex) {
+  if (!state.hex || anySelection) {
     const radius = pointRadius();
     layers.push(new ScatterplotLayer({
       id: "collisions",
       // Slight first, so serious and fatal collisions are drawn on top.
-      data: drawOrder,
+      // Details on demand: reveal the actual collision locations in selected
+      // hexagons or drawn areas without replacing the geographical overview.
+      data: state.hex ? drawOrder.filter(r=>A?.has(r.i)||B?.has(r.i)) : drawOrder,
       getPosition: (r) => r.position,
       getRadius: (r) => ((A && A.has(r.i)) || (B && B.has(r.i)) ? radius + 0.6 : radius),
       radiusUnits: "pixels",
@@ -448,8 +470,8 @@ function onHover(info) {
     state.hoverHs = object.h.id;
     state.hoverPt = null;
     showTip(x, y, `<b>${escapeHtml(hotspotName(object.h))}</b><span>${object.n} collisions · ${Math.round(object.ksi)}% KSI · click to select</span>`);
-  } else if (layer?.id === "hexagons" && object) {
-    showTip(x, y, `<b>${object.n} collisions</b><span>${Math.round(object.ksi)}% killed or seriously injured</span>`);
+  } else if (layer?.id.startsWith("hexagons-") && object) {
+    showTip(x, y, `<b>${escapeHtml(hexName(object,true))}</b><span>${state.temporal.mode==="compare"?`${state.temporal.from}: ${object.before} collisions · ${state.temporal.to}: ${object.after} collisions<br>${differenceWords(object.delta)}`:`${object.after} collisions in ${selectedYearWords(state.temporal)}`}<br>Click for the area profile and records.</span>`);
   } else {
     changed = state.hoverPt !== null || state.hoverHs !== null;
     state.hoverPt = null;
@@ -469,6 +491,7 @@ function onClick(info) {
     details.open(object, sameLocation);
     return;
   }
+  if (layer?.id.startsWith("hexagons-") && object) { selectHex(object.id); return; }
   if (layer?.id === "hotspots" && object) {
     selectHotspot(object.h.id);
   }
@@ -481,6 +504,8 @@ const deck = new Deck({
   layers: [basemap],
   pickingRadius: 5,
   onViewStateChange: ({ viewState: next }) => {
+    cancelAnimationFrame(cameraFrame);
+    cameraFrame=0;
     viewState = clampView(next);
     deck.setProps({ viewState });
     hideTip();
@@ -516,7 +541,7 @@ function drawOverlay() {
   // Town and street names come from the basemap itself, so none are drawn here.
 
   // Hotspot rank numbers (top 10, plus selected / hovered)
-  stats.forEach((s) => {
+  (state.hex ? [] : stats).forEach((s) => {
     const isA = state.selA?.type === "hotspot" && state.selA.id === s.h.id;
     const isB = state.selB?.type === "hotspot" && state.selB.id === s.h.id;
     const hover = state.hoverHs === s.h.id;
@@ -535,6 +560,13 @@ function drawOverlay() {
         stroke: land, "stroke-width": 3.5, "paint-order": "stroke",
       }, overlay, `${hotspotName(s.h)} · ${s.n} collisions · ${Math.round(s.ksi)}% KSI`);
     }
+  });
+
+  if(state.hex)temporalRank.forEach((b,i)=>{
+    const [x,y]=vp.project(b.centre);
+    if(x<0||y<0||x>width||y>height)return;
+    svgEl("circle",{cx:x,cy:y,r:9,fill:css("--paper"),stroke:css("--text"),"stroke-width":1},overlay);
+    svgEl("text",{x,y:y+3.5,"text-anchor":"middle","font-size":10,"font-weight":700},overlay,i+1);
   });
 
   // Lasso / box being drawn
@@ -650,15 +682,15 @@ function yearRange() {
 
 function renderHeader() {
   $("kpi-n").textContent = fmt(F.length);
-  const count = Object.values(state.filters).reduce((sum, set) => sum + set.size, 0);
+  const count = Object.entries(state.filters).reduce((sum, [key,set]) => sum + (state.hex&&key==="yr"?0:set.size), 0);
   $("kpi-sub").textContent = count
     ? `of ${fmt(P.length)} · ${count} filter${count > 1 ? "s" : ""} active`
-    : `${yearRange()} · all collisions`;
+    : state.hex ? (state.temporal.mode==="compare"?`${state.temporal.from} and ${state.temporal.to} combined`:`Years ${selectedYearWords(state.temporal)}`) : `${yearRange()} · all collisions`;
 
   let html = "";
   if (state.selA) html += `<span class="chip sel">Area: ${escapeHtml(selName(state.selA))}<button type="button" data-clear="A" aria-label="Clear selected area">×</button></span>`;
   if (state.selB) html += `<span class="chip cmp">Compare: ${escapeHtml(selName(state.selB))}<button type="button" data-clear="B" aria-label="Clear compared area">×</button></span>`;
-  Object.entries(state.filters).forEach(([key, set]) => set.forEach((value) => {
+  Object.entries(state.filters).filter(([key])=>!state.hex||key!=="yr").forEach(([key, set]) => set.forEach((value) => {
     html += `<span class="chip">${escapeHtml(FILTER_LABEL[key](value))}<button type="button" data-unfilter="${key}|${value}" aria-label="Remove filter">×</button></span>`;
   }));
   if (count) html += `<span class="chip clear"><button type="button" data-clear-all="1">Clear all filters</button></span>`;
@@ -673,7 +705,30 @@ function renderHeader() {
   document.querySelectorAll("#colorby [data-c]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.c === state.colorBy)));
 }
 
+function renderTemporal() {
+  const controls=$("temporal-controls"),caption=$("time-map-caption");
+  if(!controls)return;
+  controls.hidden=!state.hex;caption.hidden=!state.hex;
+  document.querySelector(".side-foot").hidden=state.hex;
+  if(!state.hex)return;
+  const wasOpen=controls.querySelector("details")?.open;
+  controls.innerHTML=temporalControls(META,state,temporalTotals);
+  if(wasOpen)controls.querySelector("details").open=true;
+  caption.innerHTML=temporalLegend(state,temporalData,temporalCountMax,SEVERITY_RGB);
+}
+
 function renderRank() {
+  $("sort").hidden=state.hex;
+  $("rank").classList.toggle("time-list",state.hex);
+  document.querySelector(".side-body .sec-h h2").textContent=state.hex?(state.temporal.mode==="compare"?"Where collisions increased or decreased":"Where most collisions occurred"):"Where to look first";
+  if(state.hex){
+    $("hs-count").textContent=`${temporalData.length} areas`;
+    $("hs-hint").textContent=state.temporal.mode==="compare"?`${temporalData.filter(b=>b.delta>0).length} areas recorded more collisions; ${temporalData.filter(b=>b.delta<0).length} recorded fewer. Largest differences are listed below. Numbers match the map.`:`Areas with the most recorded collisions in ${selectedYearWords(state.temporal)}. Numbers match the map.`;
+    $("rank").innerHTML=temporalList(temporalRank,state,hexName);
+    return;
+  }
+  $("hs-hint").textContent=`Dense collision areas across all years (DBSCAN: ${META.hotspots.minCollisions} collisions within ${META.hotspots.radiusMetres} m).`;
+
   $("hs-count").textContent = `${stats.length} ${stats.length === 1 ? "area" : "areas"}`;
   $("rank").innerHTML = stats.map((s) => {
     const max = Math.max(1, ...s.yrs);
@@ -701,6 +756,7 @@ function renderRank() {
 // --------------------------------------------------
 function renderCard() {
   const card = $("card");
+  card.hidden=state.hex&&!state.selA;
   if (!state.selA) {
     card.className = "card empty";
     card.innerHTML = `<div class="k">Start here</div><h3>Select an area to see what makes it different</h3>
@@ -751,12 +807,14 @@ function renderCard() {
   const stat = (value, label, other) => `<div><b>${value}</b><span>${label}</span>${b ? `<div class="b2">${other}</div>` : ""}</div>`;
   card.innerHTML = `<div class="k">${state.selA.type === "hotspot" ? "Selected hotspot" : `Selected area · ${state.selA.tool}`}</div>
     <h3>${escapeHtml(selName(state.selA))}${B ? `<small>compared with ${escapeHtml(referenceLabel)}</small>` : ""}</h3>
+    ${state.selA.hexId?(()=>{const b=temporalData.find(b=>b.id===state.selA.hexId);return b?`<p class="time-summary"><b>${state.temporal.mode==="compare"?differenceWords(b.delta):`${b.after} collisions in ${selectedYearWords(state.temporal)}`}</b>${META.years.map((y,i)=>`${y}: ${b.counts[i]}`).join(" · ")} collisions</p>`:"";})():""}
     <div class="stats">
       ${stat(a.n, "collisions", b?.n)}${stat(a.cas, "casualties", b?.cas)}${stat(`${a.k}%`, "KSI", `${b?.k}%`)}${stat(a.f, "fatal", b?.f)}
     </div>
     <div class="prof-h"><span>Compared with ${escapeHtml(referenceLabel)}</span><span>dashed line = ${B ? "compared area" : "average"}</span></div>
     ${profile}
     <p class="standout">${standout}</p>
+    ${state.hex?'<p class="hint">Collision points in this area are now visible on the map. Click a point for collision, vehicle and casualty details.</p>':""}
     <div class="btns">
       <button type="button" class="btn primary" data-card="table">Show these ${a.n} in a table</button>
       <button type="button" class="btn" data-card="compare">${state.selB ? "Change comparison" : state.pickB ? "Picking… (Esc to cancel)" : "Compare with…"}</button>
@@ -820,12 +878,16 @@ function setNote(text) {
 
 function renderNote() {
   const note = $("mapnote");
+  const quiet=state.hex&&state.mode==="select"&&!state.pickB&&!noteOverride;
+  note.hidden=quiet;
+  const caption=$("time-map-caption");
+  if(caption)caption.hidden=!state.hex||!quiet;
   note.classList.toggle("alert", state.pickB);
   note.textContent = noteOverride
     || (state.pickB ? "Pick a second area to compare: click a hotspot, a row in the list, or draw a lasso or box."
       : state.mode === "lasso" ? "Drag on the map to draw around an area."
       : state.mode === "box" ? "Drag on the map to draw a box."
-      : state.hex ? "Hexagon colour = share killed or seriously injured (light → dark). Size = number of collisions."
+      : state.hex ? "Each hexagon is a fixed geographical area. Hover for counts; click for severity, road users and conditions."
       : "Drag to pan, scroll to zoom. Hover a point for a summary, click it for full details. Click a hotspot outline to select it.");
   noteOverride = "";
   const A = selPoints(state.selA);
@@ -835,6 +897,7 @@ function renderNote() {
   $("leg-b").hidden = !state.selB;
   document.querySelectorAll(".tool[data-mode]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === state.mode)));
   $("hex-button").setAttribute("aria-pressed", String(state.hex));
+  $("hex-button").textContent=state.hex?"Show individual collisions":"Show hexagon areas";
   overlay.classList.toggle("drawing", state.mode !== "select");
 }
 
@@ -843,6 +906,7 @@ function renderNote() {
 // --------------------------------------------------
 function renderAll() {
   renderHeader();
+  renderTemporal();
   renderRank();
   renderCard();
   renderCharts();
@@ -852,8 +916,20 @@ function renderAll() {
 }
 
 function update() {
+  if(state.hex)state.filters.yr=new Set(state.temporal.mode==="compare"?[state.temporal.from,state.temporal.to]:[...state.temporal.years]);
   version += 1;
   recompute();
+  // No selected outline, points or table from an excluded year/filter may leak
+  // into the next analytical view. Fixed grid geometry stays shared; data does not.
+  if(state.hex) {
+    if(state.selB && !selPoints(state.selB).length)state.selB=null;
+    if(state.selA && !selPoints(state.selA).length) {
+      state.selA=state.selB;
+      state.selB=null;
+      state.pickB=false;
+      if(!state.selA)state.drawer=false;
+    }
+  }
   // A shown collision that no longer matches the filters is closed.
   if (details.isOpen() && !inF.has(details.current().i)) details.close();
   renderAll();
@@ -874,9 +950,11 @@ document.querySelectorAll(".tool[data-mode]").forEach((button) => button.addEven
 }));
 $("hex-button").addEventListener("click", () => {
   state.hex = !state.hex;
+  if(!state.hex)state.filters.yr.clear();
+  state.selA=state.selB=null;
   hideTip();
-  renderNote();
-  scheduleFrame();
+  update();
+  fitBounds(META.bounds,false);
 });
 $("sort").addEventListener("click", (event) => {
   const sort = event.target.closest("[data-sort]")?.dataset.sort;
@@ -908,11 +986,15 @@ $("key").addEventListener("click", (event) => {
 
 const rank = $("rank");
 rank.addEventListener("click", (event) => {
+  const hex=event.target.closest("[data-hex]")?.dataset.hex;
+  if(hex){selectHex(hex);return;}
   const id = event.target.closest("[data-hs]")?.dataset.hs;
   if (id != null) selectHotspot(Number(id));
 });
 rank.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" && event.key !== " ") return;
+  const hex=event.target.closest("[data-hex]")?.dataset.hex;
+  if(hex){event.preventDefault();selectHex(hex);return;}
   const id = event.target.closest("[data-hs]")?.dataset.hs;
   if (id == null) return;
   event.preventDefault();
@@ -1065,9 +1147,32 @@ async function start() {
   setView(overviewView(), false);
   $("hs-hint").textContent = `Dense collision areas, found automatically (DBSCAN: at least ${META.hotspots.minCollisions} collisions within ${META.hotspots.radiusMetres} m). Hover a row to find it on the map. Click to select it.`;
   $("loading").hidden = true;
+  state.temporal.from=META.years[0];state.temporal.to=META.years.at(-1);state.temporal.years=new Set([state.temporal.to]);
+  geographicalHexagons=buildConcentrations(P,META.years,state.temporal.size);
+  const controls=document.createElement("section");controls.id="temporal-controls";
+  controls.setAttribute("aria-label","Year comparison");$("chips").after(controls);
+  const caption=document.createElement("div");caption.id="time-map-caption";$("map-pane").append(caption);
+  controls.addEventListener("click",event=>{
+    const b=event.target.closest("button");if(!b)return;
+    const hadSelection=Boolean(state.selA);
+    cancelAnimationFrame(cameraFrame);cameraFrame=0;
+    if(b.dataset.timeMode)state.temporal.mode=b.dataset.timeMode;
+    if(b.dataset.timeFrom)state.temporal.from=Number(b.dataset.timeFrom);
+    if(b.dataset.timeTo)state.temporal.to=Number(b.dataset.timeTo);
+    if(b.dataset.timeYears){const year=Number(b.dataset.timeYears);if(state.temporal.years.has(year)){if(state.temporal.years.size>1)state.temporal.years.delete(year);}else state.temporal.years.add(year);}
+    if(b.dataset.timeAll)state.temporal.years=new Set(META.years);
+    update();
+    if(state.selA)zoomToSelection();
+    else if(hadSelection)fitBounds(META.bounds);
+  });
+  controls.addEventListener("change",event=>{
+    if(event.target.id!=="time-size")return;
+    state.temporal.size=Number(event.target.value);
+    geographicalHexagons=buildConcentrations(P,META.years,state.temporal.size);
+    state.selA=state.selB=null;update();
+  });
   update();
-  // Open in a working state: the highest-risk hotspot selected.
-  if (stats.length) selectHotspot(stats[0].h.id);
+
 }
 
 start();
