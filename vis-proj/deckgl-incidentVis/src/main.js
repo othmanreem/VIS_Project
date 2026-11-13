@@ -1,11 +1,11 @@
 import { Deck, WebMercatorViewport, FlyToInterpolator } from "@deck.gl/core";
 import { BitmapLayer, PolygonLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { TileLayer } from "@deck.gl/geo-layers";
-import { META, USERS, LIGHT, WEATHER, DAYS, SEVERITY_NAMES, loadAllData } from "./data.js";
+import { META, USERS, LIGHT, WEATHER, SEVERITY_NAMES, loadAllData } from "./data.js";
 import { findHotspots, inPolygon } from "./hotspots.js";
 import { createPlaceNamer } from "./placeNames.js";
 import { createDetailsPanel, escapeHtml } from "./details.js";
-import { renderRisk, renderSpeed, renderHeat, ksiShare, fmt } from "./charts.js";
+import { renderRisk, renderSpeed, renderYears, ksiShare, fmt } from "./charts.js";
 import "./style.css";
 
 // ==================================================
@@ -31,7 +31,7 @@ const hexToRgb = (hex) => {
 // State
 // --------------------------------------------------
 const state = {
-  filters: { user: new Set(), light: new Set(), wx: new Set(), spd: new Set(), cell: new Set(), yr: new Set() },
+  filters: { user: new Set(), light: new Set(), wx: new Set(), spd: new Set(), yr: new Set() },
   selA: null, // { type: "hotspot", id } or { type: "area", tool, poly, ids, label }
   selB: null, // second area for comparison
   pickB: false, // waiting for the user to pick the second area
@@ -65,7 +65,6 @@ function passes(record, skip = null) {
   for (const key of FIELD_FILTERS) {
     if (key !== skip && state.filters[key].size && !state.filters[key].has(record[key])) return false;
   }
-  if (skip !== "cell" && state.filters.cell.size && !state.filters.cell.has(`${record.dow}-${record.hr}`)) return false;
   return true;
 }
 
@@ -637,10 +636,6 @@ const FILTER_LABEL = {
   wx: (v) => WEATHER[v],
   spd: (v) => `${META.speeds[v]} mph`,
   yr: (v) => String(v),
-  cell: (v) => {
-    const [d, h] = v.split("-");
-    return `${DAYS[d]} ${String(h).padStart(2, "0")}:00`;
-  },
 };
 
 function yearRange() {
@@ -796,6 +791,15 @@ function chartContext() {
     filters: state.filters,
     selA: selPoints(state.selA),
     selB: state.selB ? selPoints(state.selB) : null,
+    // Records of area A or B that match every filter except `skip` (null when the
+    // area is not selected). The year chart ignores the year filter, so clicking a
+    // year dims the other years' bars instead of emptying them.
+    areaRecords: (which, skip) => {
+      const sel = which === "A" ? state.selA : state.selB;
+      if (!sel) return null;
+      const ids = sel.type === "hotspot" ? HS[sel.id].members : sel.ids;
+      return ids.map((i) => P[i]).filter((r) => passes(r, skip));
+    },
     toggle: toggleFilter,
     color: css,
   };
@@ -805,7 +809,7 @@ function renderCharts() {
   const ctx = chartContext();
   renderRisk($("risk-chart"), ctx, state.riskTab);
   renderSpeed($("speed-chart"), ctx);
-  renderHeat($("heat-chart"), ctx);
+  renderYears($("years-chart"), ctx);
   document.querySelectorAll("#risk-tab [data-t]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.t === state.riskTab)));
 }
 
@@ -830,7 +834,7 @@ function renderNote() {
   noteOverride = "";
   const A = selPoints(state.selA);
   $("an-status").textContent = state.selA
-    ? `bars = all matching collisions · blue marks = ${A.length} in ${selName(state.selA)}`
+    ? `year bars = ${selName(state.selA)} · other charts = all matching collisions, blue marks = ${A.length} in the area`
     : "all matching collisions · select an area to compare it";
   $("leg-b").hidden = !state.selB;
   document.querySelectorAll(".tool[data-mode]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === state.mode)));
@@ -952,7 +956,7 @@ $("chips").addEventListener("click", (event) => {
   const remove = event.target.closest("[data-unfilter]")?.dataset.unfilter;
   if (remove) {
     const [key, value] = remove.split("|");
-    state.filters[key].delete(key === "cell" ? value : Number(value));
+    state.filters[key].delete(Number(value));
     update();
     return;
   }

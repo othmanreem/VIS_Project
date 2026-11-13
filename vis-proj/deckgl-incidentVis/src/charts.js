@@ -3,7 +3,7 @@
 // Each chart shows all matching collisions, ignoring its own
 // filter so the other options stay visible, with marks for
 // the selected area (blue) and the compared area (orange).
-// Clicking a bar or cell toggles a filter for every view.
+// Clicking a bar toggles a filter for every view.
 //
 // ctx = {
 //   records, passes(record, skipKey), filters,
@@ -12,7 +12,7 @@
 //   toggle(filterKey, value), color(cssVar)
 // }
 // --------------------------------------------------
-import { META, USERS, LIGHT, WEATHER, DAYS } from "./data.js";
+import { META, USERS, LIGHT, WEATHER } from "./data.js";
 
 const NS = "http://www.w3.org/2000/svg";
 
@@ -156,46 +156,127 @@ export function renderSpeed(svg, ctx) {
   el("line", { x1: ml, x2: w, y1: Y(avg), y2: Y(avg), stroke: ctx.color("--text"), "stroke-dasharray": "3 3" }, svg);
 }
 
-// "When collisions happen": hour × weekday counts; dots = selected area.
-const HEAT_RAMP = ["#e6e5dc", "#c9cbbe", "#a9ad9e", "#878c7c", "#636857", "#40443a"];
+// "Collisions per year": one horizontal bar per year.
+//   length = number of collisions in that year
+//   hue    = the most common severity among those collisions
+// The bars describe the selected area when there is one, otherwise every
+// collision that matches the filters. A compared area is shown as an orange
+// tick on the same scale. Only years present in the loaded data are listed.
+// Ties between severities go to the more severe level. The hues are the
+// map's own severity colours (--fatal, --serious, --slight).
+//
+// Optional ctx.areaRecords(which, skip) returns the records of area "A" or "B"
+// that match every filter except `skip`, or null when no such area is selected.
+// The year chart asks it to ignore the year filter, so clicking a year does not
+// empty the other years' bars. Without it, ctx.selA / ctx.selB are used.
+const SEVERITY_STYLE = [
+  { name: "Fatal", variable: "--fatal", fallback: "#7a1a14" },
+  { name: "Serious", variable: "--serious", fallback: "#d8492b" },
+  { name: "Slight", variable: "--slight", fallback: "#f29a5b" },
+];
 
-export function renderHeat(svg, ctx) {
+const severityColor = (ctx, index) =>
+  ctx.color(SEVERITY_STYLE[index].variable) || SEVERITY_STYLE[index].fallback;
+
+// Most common severity (0 = fatal, 1 = serious, 2 = slight) with its share and counts.
+function dominantSeverity(records) {
+  const counts = [0, 0, 0];
+  records.forEach((r) => {
+    if (r.sev >= 1 && r.sev <= 3) counts[r.sev - 1] += 1;
+  });
+  const known = counts[0] + counts[1] + counts[2];
+  if (!known) return null;
+  const index = counts.indexOf(Math.max(...counts));
+  return { index, share: counts[index] / known, counts };
+}
+
+function groupByYear(records, years) {
+  const groups = new Map(years.map((year) => [year, []]));
+  records.forEach((r) => groups.get(r.yr)?.push(r));
+  return groups;
+}
+
+export function renderYears(svg, ctx) {
   const [w, h] = prepare(svg);
-  const counts = DAYS.map(() => new Array(24).fill(0));
-  ctx.records.filter((r) => ctx.passes(r, "cell")).forEach((r) => { if (r.hr >= 0) counts[r.dow][r.hr] += 1; });
-  const selected = DAYS.map(() => new Array(24).fill(0));
-  ctx.selA.forEach((r) => { if (r.hr >= 0) selected[r.dow][r.hr] += 1; });
-  const max = Math.max(1, ...counts.flat());
-  const ml = 30;
-  const mb = 18;
-  const cw = (w - ml) / 24;
-  const ch = (h - mb) / 7;
+  const present = new Set(ctx.records.map((r) => r.yr));
+  const years = META.years.filter((year) => present.has(year));
+  if (!years.length) {
+    el("text", { x: 0, y: 16, "font-size": 12, class: "muted" }, svg, "No collisions to show.");
+    return;
+  }
 
-  DAYS.forEach((day, d) => {
-    el("text", { x: ml - 5, y: d * ch + ch / 2 + 3.5, "text-anchor": "end", "font-size": 10, class: "muted" }, svg, day);
-    for (let hour = 0; hour < 24; hour++) {
-      const value = counts[d][hour];
-      const key = `${d}-${hour}`;
-      const active = ctx.filters.cell.has(key);
-      const step = value ? Math.min(5, Math.floor((value / max) * 5.999)) : -1;
-      const cell = el("rect", {
-        x: ml + hour * cw + 0.6, y: d * ch + 0.6, width: Math.max(0.5, cw - 1.2), height: Math.max(0.5, ch - 1.2), rx: 2,
-        fill: step < 0 ? ctx.color("--cell0") : HEAT_RAMP[step],
-        stroke: active ? ctx.color("--text") : "none", "stroke-width": active ? 2 : 0, class: "bar-hit",
-      }, svg);
-      const hh = (n) => String(n).padStart(2, "0");
-      el("title", {}, cell, `${day} ${hh(hour)}:00–${hh(hour + 1)}:00 · ${value} collisions`
-        + (selected[d][hour] ? ` · ${selected[d][hour]} in the selected area` : ""));
-      cell.addEventListener("click", () => ctx.toggle("cell", key));
-      if (selected[d][hour]) {
-        el("circle", {
-          cx: ml + hour * cw + cw / 2, cy: d * ch + ch / 2, r: Math.max(1, Math.min(cw / 2 - 1, 1.8 + selected[d][hour])),
-          fill: ctx.color("--sel"), "pointer-events": "none",
-        }, svg);
+  // Chosen area if there is one, otherwise everything; other filters still apply.
+  const area = (which) => (ctx.areaRecords
+    ? ctx.areaRecords(which, "yr")
+    : which === "A" ? (ctx.selA && ctx.selA.length ? ctx.selA : null) : ctx.selB || null);
+  const areaA = area("A");
+  const areaB = area("B");
+  const hasArea = areaA !== null;
+  const byYear = groupByYear(hasArea ? areaA : ctx.records.filter((r) => ctx.passes(r, "yr")), years);
+  const compared = areaB ? groupByYear(areaB, years) : null;
+  const filterable = ctx.filters.yr instanceof Set; // years can also act as a filter
+
+  const legendH = 20;
+  const top = 4;
+  const rh = Math.min(36, (h - legendH - top) / years.length);
+  const barH = Math.max(8, Math.min(18, rh - 10));
+  const ml = 38;
+  const mr = Math.min(130, w * 0.4);
+  const max = Math.max(1, ...years.map((year) => Math.max(
+    byYear.get(year).length, compared ? compared.get(year).length : 0)));
+  const X = (v) => ml + (v / max) * (w - ml - mr);
+
+  years.forEach((year, i) => {
+    const records = byYear.get(year);
+    const n = records.length;
+    const dominant = dominantSeverity(records);
+    const y = top + i * rh;
+    const by = y + (rh - 2 - barH) / 2;
+    const active = filterable && ctx.filters.yr.has(year);
+    const on = !filterable || !ctx.filters.yr.size || active;
+    const g = el("g", {}, svg);
+
+    el("rect", { x: 0, y, width: w, height: rh - 2, fill: "transparent" }, g);
+    el("text", { x: 0, y: by + barH / 2 + 4, "font-size": 12, "font-weight": active ? 700 : 400 }, g, String(year));
+    if (n) {
+      el("rect", {
+        x: ml, y: by, width: Math.max(2, X(n) - ml), height: barH, rx: 2,
+        fill: dominant ? severityColor(ctx, dominant.index) : ctx.color("--neutral-bar"),
+        "fill-opacity": on ? 1 : 0.3,
+      }, g);
+    }
+    const label = el("text", { x: X(n) + 6, y: by + barH / 2 + 4, "font-size": 11, "font-weight": 650 }, g, fmt(n));
+    if (dominant) {
+      el("tspan", { dx: 6, "font-size": 10, "font-weight": 400, class: "muted" }, label,
+        `${Math.round(dominant.share * 100)}% ${SEVERITY_STYLE[dominant.index].name.toLowerCase()}`);
+    }
+    if (compared) {
+      const c = compared.get(year).length;
+      if (c) {
+        el("line", { x1: X(c), x2: X(c), y1: by - 3, y2: by + barH + 3, stroke: ctx.color("--cmp"), "stroke-width": 3 }, g);
       }
     }
+
+    const breakdown = dominant
+      ? SEVERITY_STYLE.map((s, k) => `${s.name} ${dominant.counts[k]}`).join(", ")
+      : "no severity recorded";
+    const noun = (count) => `${fmt(count)} ${count === 1 ? "collision" : "collisions"}`;
+    const summary = `${year}: ${noun(n)}${hasArea ? " in the selected area" : ""} (${breakdown})`
+      + (compared ? ` · ${noun(compared.get(year).length)} in the compared area` : "");
+    if (filterable) {
+      clickable(g, `${summary}. Click to filter.`, () => ctx.toggle("yr", year));
+    } else {
+      g.setAttribute("role", "img");
+      g.setAttribute("aria-label", summary);
+    }
+    el("title", {}, g, summary);
   });
-  [0, 6, 12, 18].forEach((hour) => {
-    el("text", { x: ml + hour * cw, y: h - 4, "font-size": 10, class: "muted" }, svg, `${String(hour).padStart(2, "0")}:00`);
+
+  // Colour key for the bar hue.
+  let x = 0;
+  SEVERITY_STYLE.forEach((style, index) => {
+    el("rect", { x, y: h - 13, width: 9, height: 9, rx: 2, fill: severityColor(ctx, index) }, svg);
+    el("text", { x: x + 13, y: h - 5, "font-size": 10, class: "muted" }, svg, style.name);
+    x += 13 + style.name.length * 5.8 + 14;
   });
 }
