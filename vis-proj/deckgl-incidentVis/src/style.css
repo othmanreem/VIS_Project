@@ -21,9 +21,9 @@
     --risk: #8a2a1c;
     --neutral-bar: #a3a69b;
     --cell0: #efeee8;
-    --fatal: #7a1a14;
-    --serious: #d8492b;
-    --slight: #f29a5b;
+    --fatal: #202124;
+    --serious: #d11c59;
+    --slight: #00a6a6;
     --shadow: 0 8px 28px rgba(48, 55, 41, 0.14);
     /* Year colours as r, g, b (used with rgb(var(--year-2020))) */
     --year-2020: 230, 126, 34;
@@ -359,7 +359,7 @@ tbody tr:hover { background: var(--sel-soft); }
 .an-h > span { color: var(--muted); font-size: 11.5px; }
 .legend-inline { display: inline-flex; gap: 12px; margin-left: auto; color: var(--muted); font-size: 11px; }
 .legend-inline i { display: inline-block; width: 12px; height: 0; margin-right: 4px; vertical-align: middle; }
-.lg-all { border-top: 1px dashed var(--text); }
+.lg-all { border-top: 7px solid var(--neutral-bar); }
 .lg-sel { border-top: 3px solid var(--sel); }
 .lg-cmp { border-top: 3px solid var(--cmp); }
 .grid { display: grid; flex: 1; grid-template-columns: 1.15fr 1fr 1fr; gap: 10px; min-height: 0; }
@@ -384,3 +384,30 @@ tbody tr:hover { background: var(--sel-soft); }
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* Leave enough room for direct area labels, including a second selection. */
+#analysis .grid { min-height: 340px; flex-basis: 340px; }
+
+#analysis .grid.two-areas { min-height: 430px; flex-basis: 430px; }
+
+@media (min-width: 901px) {
+  #map-pane:has(.card:not([hidden]):not(.empty)) .zoom { right: 364px; }
+}
+
+.chart-group-label {display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);}.chart-group-label select {font:inherit;color:var(--text);background:var(--paper);border:1px solid var(--border);border-radius:5px;padding:5px;max-width:150px;}
+
+/* One analysis workspace; comparisons stay visible together. */
+#analysis .municipal-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:14px;flex:none;min-height:0;}
+.municipal-grid .panel{min-height:0;}.municipal-grid .speed-panel,.municipal-grid .time-panel{height:340px;}.municipal-grid #speed-chart,.municipal-grid #heat-chart{min-height:220px;}
+.analysis-scope,.chart-reading{font-size:11px;color:var(--muted);line-height:1.5;margin:6px 0 10px;}.analysis-scope{color:var(--text);}
+.annual-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;}.annual-heading h2{font-size:14px;margin:0;}.annual-heading button{font-size:11px;white-space:nowrap;}
+#annual-locations{padding:3px 0 12px;border-bottom:1px solid var(--border);margin-bottom:10px;flex-shrink:0;}.annual-scroll,.user-years-scroll{overflow:auto;}
+.year-locations,.user-years{width:100%;border-collapse:separate;border-spacing:3px;font-size:11px;table-layout:fixed;}.year-locations th:first-child{width:28%;text-align:left;}.year-locations button,.user-years button{background:none;border:0;color:inherit;font:inherit;cursor:pointer;padding:5px;width:100%;border-radius:3px;}
+.year-locations tbody td button{background:rgba(149,82,35,var(--cell-alpha));}.year-locations tbody th button{text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}.year-locations tbody tr:hover th{background:var(--sel-soft);}.year-locations td{text-align:center;}.year-totals td,.year-totals th{padding:6px 4px;font-weight:600;}
+.year-locations thead button[aria-pressed=true],.user-years thead button[aria-pressed=true]{box-shadow:inset 0 -2px var(--sel);font-weight:700;}
+.severity-key{display:flex;gap:12px;font-size:11px;}.severity-key span{display:flex;gap:4px;align-items:center;}.severity-key i{width:10px;height:10px;display:inline-block;border-radius:2px;}
+.user-years{min-width:460px;}.user-years th:first-child{width:105px;text-align:left;}.user-years tbody td{padding:7px 0;vertical-align:middle;}.user-years td button{min-height:65px;text-align:center;}.user-years td b{display:block;font-size:13px;}.user-years td small{display:block;font-size:9px;white-space:nowrap;color:var(--muted);margin-top:5px;}.severity-stack{display:flex;height:10px;width:100%;margin-top:6px;background:var(--surface);}.severity-stack i{height:100%;}.user-active{background:var(--sel-soft);}.no-records{color:var(--muted);font-size:10px;}
+.condition-facets{display:grid;grid-template-columns:1fr 1fr;gap:12px;}.condition-facets section{min-width:0;}.condition-facets h3,.matrix-title{font-size:12px;margin:8px 0;}.condition-value{display:grid;grid-template-columns:1fr auto;gap:4px 6px;width:100%;background:none;border:1px solid transparent;border-radius:4px;padding:5px;text-align:left;font-size:11px;color:var(--text);cursor:pointer;}.condition-value b{font-size:12px;}.condition-value small{grid-column:1/-1;color:var(--muted);font-size:10px;}.condition-track{grid-column:1/-1;display:block;width:100%;height:6px;background:var(--surface);}.condition-track i{display:block;height:100%;background:#306da0;}.condition-value:nth-of-type(2) .condition-track i{background:#9b662d;}.condition-value[aria-pressed=true],.condition-matrix button[aria-pressed=true]{outline:2px solid var(--sel);outline-offset:-2px;background:var(--sel-soft);}.condition-value:hover{background:var(--surface);}.excluded{display:block;font-size:9px;color:var(--muted);padding:3px 5px;}
+.condition-matrix{display:grid;grid-template-columns:65px 1fr 1fr;gap:5px;align-items:center;font-size:11px;}.condition-matrix>b{text-align:center;}.condition-matrix button{border:1px solid var(--border);border-radius:4px;padding:9px 5px;cursor:pointer;}.condition-matrix button b{display:block;font-size:16px;}.condition-matrix small{display:block;font-size:10px;margin-top:4px;}.circumstance-details{font-size:11px;}.circumstance-details>summary{cursor:pointer;color:var(--sel);padding:7px 0;}
+@media(max-width:1200px){#analysis .municipal-grid{grid-template-columns:1fr;}.user-years{min-width:460px;}.condition-facets{grid-template-columns:repeat(4,1fr);}.condition-matrix{max-width:500px;}}
+@media(max-width:650px){.condition-facets{grid-template-columns:1fr 1fr;}.year-locations{min-width:500px;}}

@@ -9,7 +9,7 @@
 .time-options{margin-top:6px;font-size:11px;color:var(--muted);}.time-options summary{cursor:pointer;}.time-options select{margin:6px 0;border:1px solid var(--border);background:var(--paper);padding:4px;}.time-options p{margin:0;line-height:1.4;}
 .rank li.time-result{grid-template-columns:22px minmax(0,1fr);align-items:start;padding:10px 5px;}
 .time-result b{display:block;font-size:12px;line-height:1.4;}.time-difference{display:block;font-size:12px;margin:4px 0;}.time-difference.more{color:#a24422;}.time-difference.fewer{color:#306da0;}.time-counts{font-size:11px;color:var(--muted);display:block;line-height:1.45;}
-#time-map-caption{position:absolute;z-index:2;left:16px;bottom:16px;width:290px;max-width:calc(100% - 80px);padding:12px 14px;background:rgba(255,254,250,.97);border:1px solid var(--border);border-radius:10px;box-shadow:0 3px 14px rgba(48,55,41,.08);pointer-events:none;font-size:11px;line-height:1.5;}
+#time-map-caption{flex-shrink:0;padding:12px 20px;background:var(--paper);border-top:1px solid var(--border);font-size:11px;line-height:1.5;}
 .time-legend-heading{display:flex;align-items:start;justify-content:space-between;gap:10px;margin-bottom:10px;}.time-legend-heading b{font-size:12px;font-weight:650;}.time-legend-heading>span{font-size:10px;color:var(--muted);white-space:nowrap;padding-top:1px;}
 .time-legend-label{color:var(--muted);font-size:10.5px;margin-bottom:5px;}
 .time-legend-keys{display:flex;align-items:center;justify-content:space-between;gap:8px;}.time-legend-keys>span{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;}

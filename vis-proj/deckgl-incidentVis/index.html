@@ -68,6 +68,7 @@
                     <button type="button" class="tool" data-mode="select" aria-pressed="true">✋ Select &amp; pan</button>
                     <button type="button" class="tool" data-mode="lasso" aria-pressed="false">◌ Lasso area</button>
                     <button type="button" class="tool" data-mode="box" aria-pressed="false">▭ Box</button>
+                    <label class="tool points-switch" id="points-switch"><input type="checkbox" id="show-bin-points" role="switch" aria-label="Show all collision points"><span class="switch-track" aria-hidden="true"></span>All points</label>
                     <button type="button" class="tool" id="hex-button" aria-pressed="false">⬡ Hexagons</button>
                 </div>
 
@@ -114,34 +115,16 @@
                     <h2 id="analysis-title">Analysis</h2>
                     <span id="an-status"></span>
                     <span class="legend-inline">
-                        <span><i class="lg-all"></i>all matching</span>
+                        <span><i class="lg-all"></i>overall bar</span>
                         <span><i class="lg-sel"></i>selected area</span>
                         <span id="leg-b" hidden><i class="lg-cmp"></i>compared area</span>
                     </span>
                 </div>
-                <div class="grid">
-                    <div class="panel">
-                        <div class="panel-h">
-                            <h2>Where collisions turn serious</h2>
-                            <div class="seg" id="risk-tab" role="group" aria-label="Group by">
-                                <button type="button" data-t="user" aria-pressed="true">Road user</button>
-                                <button type="button" data-t="light" aria-pressed="false">Lighting</button>
-                                <button type="button" data-t="wx" aria-pressed="false">Weather</button>
-                            </div>
-                        </div>
-                        <p class="hint">Serious or fatal collisions (%). Click a bar to filter.</p>
-                        <svg id="risk-chart"></svg>
-                    </div>
-                    <div class="panel">
-                        <div class="panel-h"><h2>Speed limit risk</h2></div>
-                        <p class="hint">Serious or fatal collisions (%) by speed limit (mph). Dashed line = average.</p>
-                        <svg id="speed-chart"></svg>
-                    </div>
-                    <div class="panel">
-                        <div class="panel-h"><h2>When collisions happen</h2></div>
-                        <p class="hint">Hour × weekday, darker = more. Dots = selected area. Click cells to filter.</p>
-                        <svg id="heat-chart"></svg>
-                    </div>
+                <div class="grid municipal-grid">
+                    <div class="panel user-panel"><div class="panel-h"><h2>Who is affected, and how has severity changed?</h2></div><div id="risk-chart"></div></div>
+                    <div class="panel condition-panel"><div class="panel-h"><h2>Which conditions accompany severe outcomes?</h2></div><div id="condition-chart"></div></div>
+                    <div class="panel speed-panel"><div class="panel-h"><h2>Severity by speed limit</h2></div><p class="hint"></p><svg id="speed-chart"></svg></div>
+                    <div class="panel time-panel"><div class="panel-h"><h2>When collisions happen</h2></div><p class="hint">Darker = more collisions. Dots = selection. Click or drag a time range; Shift-drag adds.</p><svg id="heat-chart"></svg></div>
                 </div>
             </section>
         </main>

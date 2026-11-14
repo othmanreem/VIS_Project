@@ -13,6 +13,7 @@
 // }
 // --------------------------------------------------
 import { META, USERS, LIGHT, WEATHER, DAYS } from "./data.js";
+import {RQ3_PAIRS,RQ3_COMBINATIONS} from "./areaGroups.js";
 
 const NS = "http://www.w3.org/2000/svg";
 
@@ -50,116 +51,94 @@ function clickable(group, label, onActivate) {
   });
 }
 
-// "Where collisions turn serious": KSI share per road user / lighting / weather.
+// Overall bars and selected-area markers share the same 0–100% scale.
 const RISK_FIELDS = { user: USERS, light: LIGHT, wx: WEATHER };
-
+const CONDITION_FIELDS={surface:RQ3_PAIRS[0].groups,road:RQ3_PAIRS[3].groups,combined:RQ3_COMBINATIONS};
+const shareText = records => records.length ? `${Math.round(ksiShare(records))}%` : '—';
+const countText = records => `${records.filter(r => r.sev <= 2).length} of ${records.length}`;
+function areas(ctx, field) {
+  return [
+    ctx.hasSelection && { label: ctx.selectionLabel||'Area', records: ctx.areaRecords(field), color: ctx.color('--sel') },
+    ctx.selB && { label: 'Compared', records: ctx.comparedRecords(field), color: ctx.color('--cmp') },
+  ].filter(Boolean);
+}
+function chartKey(svg, ctx) {
+  const hint = svg.previousElementSibling;
+  hint.textContent = 'Serious or fatal collisions (%). Grey bar: overall.'
+    + (ctx.hasSelection ? ` Blue line: selected ${ctx.selectionLabel==='Circumstance'?'circumstance':'area'}.` : ' Select an area to compare.')
+    + (ctx.selB ? ' Orange line: compared area.' : '');
+}
+function tooltip(g, base, selected) {
+  el('title', {}, g, `Overall: ${shareText(base)} (${countText(base)} collisions serious or fatal).`
+    + selected.map(a => ` ${a.label}: ${shareText(a.records)} (${countText(a.records)}).`).join('')
+    + ' This chart keeps its own filter options visible; other filters apply.');
+}
 export function renderRisk(svg, ctx, field) {
   const [w, h] = prepare(svg);
-  const names = RISK_FIELDS[field];
-  const base = ctx.records.filter((r) => ctx.passes(r, field));
-  const avg = ksiShare(base);
-  const rows = names
-    .map((name, value) => {
-      const group = base.filter((r) => r[field] === value);
-      return { value, name, n: group.length, k: ksiShare(group) };
-    })
-    .filter((row) => row.n > 0)
-    .sort((a, b) => b.k - a.k);
-
-  const ml = Math.min(130, w * 0.36);
-  const mr = 46;
-  const top = 4;
-  const rh = Math.min(40, (h - 22) / Math.max(1, rows.length));
-  const barH = Math.max(6, Math.min(14, rh - 14));
-  const max = Math.max(60, ...rows.map((row) => row.k));
-  const X = (v) => ml + (v / max) * (w - ml - mr);
-
+  chartKey(svg, ctx);
+  const base = ctx.records.filter(r => ctx.passes(r, field));
+  const selected = areas(ctx, field);
+  const conditions=CONDITION_FIELDS[field];
+  const rows = conditions ? conditions.map((m,value)=>({name:field==='combined'?['Dark · wet','Dark · dry','Daylight · wet','Daylight · dry'][value]:m.label,value,metric:m,records:base.filter(m.test)}))
+    : RISK_FIELDS[field].map((name,value)=>({name,value,records:base.filter(r=>r[field]===value)})).sort((a,b)=>ksiShare(b.records)-ksiShare(a.records));
+  const omitted=conditions?base.length-rows.reduce((n,r)=>n+r.records.length,0):0;
+  const ml = Math.min(130, w * .36), mr = 34;
+  const X = v => ml + v / 100 * (w - ml - mr);
+  const rh = Math.min(64, (h - 20) / rows.length);
   rows.forEach((row, i) => {
-    const y = top + i * rh;
-    const active = ctx.filters[field].has(row.value);
-    const on = !ctx.filters[field].size || active;
-    const g = el("g", {}, svg);
-    el("rect", { x: 0, y, width: w, height: rh - 2, fill: "transparent" }, g);
-    el("text", { x: 0, y: y + 12, "font-size": 12, "font-weight": active ? 700 : 400 }, g, row.name);
-    el("text", { x: 0, y: y + 25, "font-size": 10, class: "muted" }, g, `${fmt(row.n)} collisions`);
-    el("rect", {
-      x: ml, y: y + 3, width: Math.max(1, X(row.k) - ml), height: barH, rx: 2,
-      fill: row.k > avg + 5 ? ctx.color("--risk") : ctx.color("--neutral-bar"), "fill-opacity": on ? 1 : 0.3,
-    }, g);
-    el("text", { x: X(row.k) + 5, y: y + 14, "font-size": 11, "font-weight": 650 }, g, `${Math.round(row.k)}%`);
-    [[ctx.selA, "--sel"], [ctx.selB, "--cmp"]].forEach(([records, colorVar]) => {
-      if (!records) return;
-      const sub = records.filter((r) => r[field] === row.value);
-      if (sub.length < 3) return; // too few to show a share
-      const x = X(ksiShare(sub));
-      el("line", { x1: x, x2: x, y1: y, y2: y + barH + 6, stroke: ctx.color(colorVar), "stroke-width": 3 }, g);
+    const y = 5 + i * rh, active = conditions ? ctx.pattern?.label===row.metric.label&&!ctx.pattern.other : ctx.filters[field].has(row.value);
+    const g = el('g', {'data-category':row.value, 'data-count':row.records.length}, svg);
+    el('rect', {x:0,y:y-4,width:w,height:rh-1,fill:active?ctx.color('--sel-soft'):'transparent'}, g);
+    el('text', {x:0,y:y+10,'font-size':12,'font-weight':active?700:400},g,row.name);
+    el('text', {x:0,y:y+24,'font-size':9,class:'muted'},g,row.records.length?`${countText(row.records)} serious/fatal${row.records.length<5?'*':''}`:'No records');
+    el('line', {x1:ml,x2:X(100),y1:y+7,y2:y+7,stroke:ctx.color('--grid'),'stroke-width':1},g);
+    if(row.records.length) el('rect', {x:ml,y,width:Math.max(0,X(ksiShare(row.records))-ml),height:14,rx:2,fill:ctx.color('--neutral-bar'),'fill-opacity':conditions||!ctx.filters[field].size||active?1:.35},g);
+    el('text',{x:X(100)+5,y:y+11,'font-size':11},g,shareText(row.records));
+    const subs = selected.map(a=>({...a, records:a.records.filter(r=>conditions?row.metric.test(r):r[field]===row.value)}));
+    subs.forEach((a,j)=>{
+      if(a.records.length) el('line',{x1:X(ksiShare(a.records)),x2:X(ksiShare(a.records)),y1:j?y+14:y-3,y2:j?y+25:y+14,stroke:a.color,'stroke-width':3,'data-area-marker':a.label},g);
+      const text=el('text',{x:ml,y:y+29+j*13,'font-size':10.5,'font-weight':600},g,
+        a.records.length ? `${a.label}: ${shareText(a.records)} (${countText(a.records)})${a.records.length<5?'*':''}` : `${a.label}: no collisions`);
+      text.style.fill=a.color;
     });
-    clickable(g, `${row.name}: ${Math.round(row.k)}% killed or seriously injured, ${row.n} collisions. Click to filter.`,
-      () => ctx.toggle(field, row.value));
+    tooltip(g,row.records,subs);
+    clickable(g,`${row.name}: overall ${shareText(row.records)}. ${subs.map(a=>`${a.label} ${shareText(a.records)}, ${countText(a.records)}`).join('. ')}. ${conditions?'Click to highlight matching collisions; click again to clear.':'Click to filter.'}`,()=>conditions?ctx.selectPattern(row.metric.label):ctx.toggle(field,row.value));
   });
-
-  if (!rows.length) {
-    el("text", { x: 0, y: 16, "font-size": 12, class: "muted" }, svg, "No collisions match the filters.");
-    return;
-  }
-  el("line", { x1: X(avg), x2: X(avg), y1: 0, y2: top + rows.length * rh, stroke: ctx.color("--text"), "stroke-dasharray": "3 3" }, svg);
-  el("text", {
-    x: X(avg), y: Math.min(h - 3, top + rows.length * rh + 12), "text-anchor": "middle", "font-size": 10, class: "muted",
-  }, svg, `average ${Math.round(avg)}%`);
+  el('text',{x:0,y:h-2,'font-size':9.5,class:'muted'},svg,conditions?`${omitted?`${omitted} other/unknown excluded · `:''}* Fewer than 5 records`:selected.length?'* Fewer than 5 collisions; read with care.':'Click a category to filter; others stay visible.');
 }
 
-// "Speed limit risk": KSI share per speed limit (the limits found in the data).
 export function renderSpeed(svg, ctx) {
-  const [w, h] = prepare(svg);
-  const SPEEDS = META.speeds;
-  const base = ctx.records.filter((r) => ctx.passes(r, "spd"));
-  const groups = SPEEDS.map((_, v) => base.filter((r) => r.spd === v));
-  const avg = ksiShare(base);
-  const ml = 30;
-  const mb = 30;
-  const mt = 16;
-  const max = Math.max(50, ...groups.map((g) => ksiShare(g)));
-  const bw = (w - ml) / SPEEDS.length;
-  const Y = (v) => mt + (1 - Math.min(v, max) / max) * (h - mt - mb);
-
-  [0, Math.round(max / 2), Math.round(max)].forEach((v) => {
-    el("line", { x1: ml, x2: w, y1: Y(v), y2: Y(v), stroke: ctx.color("--grid") }, svg);
-    el("text", { x: ml - 4, y: Y(v) + 3.5, "text-anchor": "end", "font-size": 9.5, class: "muted" }, svg, `${v}%`);
-  });
-
-  groups.forEach((group, v) => {
-    const k = ksiShare(group);
-    const x = ml + v * bw;
-    const active = ctx.filters.spd.has(v);
-    const on = !ctx.filters.spd.size || active;
-    const g = el("g", {}, svg);
-    el("rect", { x, y: 0, width: bw, height: h, fill: "transparent" }, g);
-    if (group.length) {
-      el("rect", {
-        x: x + 4, y: Y(k), width: Math.max(1, bw - 8), height: Y(0) - Y(k), rx: 2,
-        fill: k > avg + 5 ? ctx.color("--risk") : ctx.color("--neutral-bar"), "fill-opacity": on ? 1 : 0.3,
-      }, g);
-      el("text", { x: x + bw / 2, y: Y(k) - 4, "text-anchor": "middle", "font-size": 10.5, "font-weight": 650 }, g, `${Math.round(k)}%`);
-    }
-    el("text", { x: x + bw / 2, y: h - 16, "text-anchor": "middle", "font-size": 10.5, "font-weight": active ? 700 : 400 }, g, SPEEDS[v]);
-    el("text", { x: x + bw / 2, y: h - 4, "text-anchor": "middle", "font-size": 9.5, class: "muted" }, g, `n=${group.length}`);
-    [[ctx.selA, "--sel"], [ctx.selB, "--cmp"]].forEach(([records, colorVar]) => {
-      if (!records) return;
-      const sub = records.filter((r) => r.spd === v);
-      if (sub.length < 3) return;
-      const y = Y(ksiShare(sub));
-      el("line", { x1: x + 4, x2: x + bw - 4, y1: y, y2: y, stroke: ctx.color(colorVar), "stroke-width": 3 }, g);
+  const [w,h]=prepare(svg);chartKey(svg,ctx);
+  const base=ctx.records.filter(r=>ctx.passes(r,'spd')), selected=areas(ctx,'spd');
+  const ml=78,mr=34,X=v=>ml+v/100*(w-ml-mr);
+  const rh=(h-20)/META.speeds.length;
+  META.speeds.forEach((speed,v)=>{
+    const records=base.filter(r=>r.spd===v),y=5+v*rh;
+    const active=ctx.filters.spd.has(v),g=el('g',{'data-category':v,'data-count':records.length},svg);
+    el('rect',{x:0,y:y-4,width:w,height:rh-1,fill:'transparent'},g);
+    el('text',{x:0,y:y+10,'font-size':12,'font-weight':active?700:400},g,`${speed} mph`);
+    el('text',{x:0,y:y+24,'font-size':10,class:'muted'},g,`${records.length} overall`);
+    el('line',{x1:ml,x2:X(100),y1:y+7,y2:y+7,stroke:ctx.color('--grid')},g);
+    if(records.length) el('rect',{x:ml,y,width:X(ksiShare(records))-ml,height:14,rx:2,fill:ctx.color('--neutral-bar'),'fill-opacity':!ctx.filters.spd.size||active?1:.35},g);
+    el('text',{x:X(100)+5,y:y+11,'font-size':11},g,shareText(records));
+    const subs=selected.map(a=>({...a,records:a.records.filter(r=>r.spd===v)}));
+    subs.forEach((a,j)=>{
+      if(a.records.length) el('line',{x1:X(ksiShare(a.records)),x2:X(ksiShare(a.records)),y1:j?y+14:y-3,y2:j?y+25:y+14,stroke:a.color,'stroke-width':3,'data-area-marker':a.label},g);
+      const text=el('text',{x:ml,y:y+29+j*13,'font-size':10.5,'font-weight':600},g,
+        a.records.length ? `${a.label}: ${shareText(a.records)} (${countText(a.records)})${a.records.length<5?'*':''}` : `${a.label}: no collisions`);
+      text.style.fill=a.color;
     });
-    clickable(g, `${SPEEDS[v]} mph: ${Math.round(k)}% killed or seriously injured, ${group.length} collisions. Click to filter.`,
-      () => ctx.toggle("spd", v));
+    tooltip(g,records,subs);
+    clickable(g,`${speed} mph: overall ${shareText(records)} (${countText(records)}). ${subs.map(a=>`${a.label}: ${shareText(a.records)} (${countText(a.records)})`).join('. ')} Click to filter.`,()=>ctx.toggle('spd',v));
   });
-  el("line", { x1: ml, x2: w, y1: Y(avg), y2: Y(avg), stroke: ctx.color("--text"), "stroke-dasharray": "3 3" }, svg);
+  el('text',{x:0,y:h-2,'font-size':9.5,class:'muted'},svg,selected.length?'* Fewer than 5 collisions; read with care.':'Click a speed limit to filter; others stay visible.');
 }
 
 // "When collisions happen": hour × weekday counts; dots = selected area.
 const HEAT_RAMP = ["#e6e5dc", "#c9cbbe", "#a9ad9e", "#878c7c", "#636857", "#40443a"];
 
 export function renderHeat(svg, ctx) {
+  if(svg.dataset.brushing)return;
   const [w, h] = prepare(svg);
   const counts = DAYS.map(() => new Array(24).fill(0));
   ctx.records.filter((r) => ctx.passes(r, "cell")).forEach((r) => { if (r.hr >= 0) counts[r.dow][r.hr] += 1; });
@@ -170,6 +149,7 @@ export function renderHeat(svg, ctx) {
   const mb = 18;
   const cw = (w - ml) / 24;
   const ch = (h - mb) / 7;
+  installTimeBrush(svg,ctx,ml,cw,ch);
 
   DAYS.forEach((day, d) => {
     el("text", { x: ml - 5, y: d * ch + ch / 2 + 3.5, "text-anchor": "end", "font-size": 10, class: "muted" }, svg, day);
@@ -186,7 +166,10 @@ export function renderHeat(svg, ctx) {
       const hh = (n) => String(n).padStart(2, "0");
       el("title", {}, cell, `${day} ${hh(hour)}:00–${hh(hour + 1)}:00 · ${value} collisions`
         + (selected[d][hour] ? ` · ${selected[d][hour]} in the selected area` : ""));
-      cell.addEventListener("click", () => ctx.toggle("cell", key));
+      cell.dataset.timeCell=key;
+      cell.setAttribute("role","button");cell.setAttribute("tabindex","0");cell.setAttribute("aria-pressed",String(active));
+      cell.setAttribute("aria-label",`${day} ${hh(hour)}:00, ${value} collisions. Toggle time filter.`);
+      cell.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();ctx.toggle("cell",key);}};
       if (selected[d][hour]) {
         el("circle", {
           cx: ml + hour * cw + cw / 2, cy: d * ch + ch / 2, r: Math.max(1, Math.min(cw / 2 - 1, 1.8 + selected[d][hour])),
@@ -198,4 +181,35 @@ export function renderHeat(svg, ctx) {
   [0, 6, 12, 18].forEach((hour) => {
     el("text", { x: ml + hour * cw, y: h - 4, "font-size": 10, class: "muted" }, svg, `${String(hour).padStart(2, "0")}:00`);
   });
+}
+
+function installTimeBrush(svg, ctx, ml, cw, ch) {
+  let drag=null,box=null;
+  svg.style.touchAction='none';
+  const cellAt=e=>{
+    const r=svg.getBoundingClientRect(),x=(e.clientX-r.left)*svg.viewBox.baseVal.width/r.width,y=(e.clientY-r.top)*svg.viewBox.baseVal.height/r.height;
+    return [Math.max(0,Math.min(6,Math.floor(y/ch))),Math.max(0,Math.min(23,Math.floor((x-ml)/cw)))];
+  };
+  const clear=()=>{box?.remove();box=null;drag=null;delete svg.dataset.brushing;};
+  svg.onpointerdown=e=>{
+    if(e.button!==0||!e.target.dataset.timeCell)return;
+    e.preventDefault();svg.dataset.brushing='true';const start=cellAt(e);drag={start,end:start,add:e.ctrlKey||e.metaKey||e.shiftKey,x:e.clientX,y:e.clientY};
+    svg.setPointerCapture(e.pointerId);
+    box=el('rect',{fill:'rgba(45,112,176,.15)',stroke:ctx.color('--sel'),'stroke-width':2,'pointer-events':'none'},svg);
+  };
+  svg.onpointermove=e=>{
+    if(!drag)return;drag.end=cellAt(e);
+    const [d,h]=drag.start,[d2,h2]=drag.end;
+    box.setAttribute('x',ml+Math.min(h,h2)*cw);box.setAttribute('y',Math.min(d,d2)*ch);
+    box.setAttribute('width',(Math.abs(h-h2)+1)*cw);box.setAttribute('height',(Math.abs(d-d2)+1)*ch);
+  };
+  svg.onpointerup=e=>{
+    if(!drag)return;
+    const {start,end,add,x,y}=drag;clear();if(svg.hasPointerCapture(e.pointerId))svg.releasePointerCapture(e.pointerId);
+    if(Math.hypot(e.clientX-x,e.clientY-y)<4){ctx.toggle('cell',`${start[0]}-${start[1]}`);return;}
+    const keys=[];for(let d=Math.min(start[0],end[0]);d<=Math.max(start[0],end[0]);d++)for(let h=Math.min(start[1],end[1]);h<=Math.max(start[1],end[1]);h++)keys.push(`${d}-${h}`);
+    ctx.selectTimeCells(keys,add);
+  };
+  svg.onpointercancel=clear;
+  svg.onkeydown=e=>{if(e.key==='Escape')clear();};
 }

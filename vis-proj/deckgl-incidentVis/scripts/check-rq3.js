@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import {conditionAnalysis,severitySummary,RQ3_PAIRS} from '../src/areaGroups.js';
+const r=(sev,p={})=>({sev,feature:{properties:p}});
+assert.deepEqual(severitySummary([]),{n:0,severe:0,share:null,unknownSeverity:0});
+const data=conditionAnalysis([r(1,{road_surface_conditions:2,light_conditions:4}),r(3,{road_surface_conditions:2,light_conditions:4}),r(2,{road_surface_conditions:1,light_conditions:1}),r(3,{road_surface_conditions:4,light_conditions:-1}),r(-1,{road_surface_conditions:2,light_conditions:4})]);
+assert.equal(data.pairs[0].groups[0].share,50);assert.equal(data.pairs[0].groups[1].share,100);assert.equal(data.pairs[0].excluded,1);assert.equal(data.total.unknownSeverity,1);assert.equal(data.combinations[0].n,2);assert.equal(data.combinations[0].severe,1);assert.equal(data.combinations[3].n,1);assert.equal(data.combinationExcluded,1);
+assert.equal(conditionAnalysis([r(3,{})]).pairs.every(p=>p.excluded===1),true);
+assert.equal(conditionAnalysis([r(3,{road_surface_conditions:null})]).pairs[0].groups[1].n,0);
+for(const pair of RQ3_PAIRS) for(const v of [-1,0,1,2,3,4,5,6,7,8,9,99]) assert.ok(pair.groups.filter(g=>g.test(r(3,{road_surface_conditions:v,light_conditions:v,weather_conditions:v,road_type:v}))).length<=1);
+console.log('RQ3 calculations passed: denominators, unknown severity, missing categories, disjoint pairs, combination counts, and empty samples.');

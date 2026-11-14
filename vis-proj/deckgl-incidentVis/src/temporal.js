@@ -3,17 +3,17 @@ import './temporal.css';
 
 export const differenceWords = n => n>0?`${n} more collisions`:n<0?`${-n} fewer collisions`:'No change';
 export const selectedYearWords = t => [...t.years].sort().join(', ');
-export function temporalLegend(state, rows, countMax, severityRGB) {
+export function temporalLegend(state, rows, countMax, severityRGB, comparisonMax) {
   const t=state.temporal;
-  const max=Math.max(0,...rows.map(b=>Math.abs(b.delta)));
   const key=(label,colour,point=false)=>`<span><i class="${point?'legend-point':'legend-area'}" style="background:${colour}"></i>${label}</span>`;
   const compare=t.mode==='compare';
   return `<div class="time-legend-heading"><b>${compare?`${t.to} compared with ${t.from}`:`Collisions in ${selectedYearWords(t)}`}</b><span>${t.size} m areas</span></div>
     <div class="time-legend-label">${compare?'Difference in collision counts':'Collision counts in the selected years'}</div>
-    ${compare?`<div class="time-legend-keys">${key('Fewer','#306da0')}${key('Same count','#a0a49a')}${key('More','#b45126')}</div><p class="time-legend-scale">${t.from===t.to?'Choose two different years.':`Largest difference: ${max} collision${max===1?'':'s'}. Stronger colour means a bigger difference.`}</p>`:`<div class="time-count-ramp" aria-label="Light means fewer collisions; dark means more"><span></span><span></span><span></span><span></span><span></span></div><div class="time-count-range"><span>0 collisions</span><span>${countMax} collisions</span></div>`}
-    ${state.selA?`<div class="time-legend-points"><div class="time-legend-label">Collision point severity</div><div class="time-legend-keys">${['Fatal','Serious','Slight'].map((name,i)=>key(name,`rgb(${severityRGB[i].join(',')})`,true)).join('')}</div></div>`:''}
-    <div class="time-legend-help">${state.selA?'Click a point for full details.':'Click an area to see its collisions.'}</div>`;
+    ${compare?`<div class="time-legend-keys">${key('Fewer','#306da0')}${key('Same count','#687177')}${key('More','#b45126')}</div><p class="time-legend-scale">${t.from===t.to?'Choose two different years.':'Stronger colour means a bigger difference.'}</p>`:`<div class="time-count-ramp" aria-label="Light means fewer collisions; dark means more"><span></span><span></span><span></span><span></span><span></span></div><div class="time-count-range"><span>0 collisions</span><span>${countMax} collisions</span></div>`}
+    ${state.showPoints||state.selA||state.selB||state.patternHighlight?`<div class="time-legend-points"><div class="time-legend-label">Collision point severity</div><div class="time-legend-keys">${['Fatal','Serious','Slight'].map((name,i)=>key(name,`rgb(${severityRGB[i].join(',')})`,true)).join('')}</div></div>`:''}
+    <div class="time-legend-help">${state.showPoints?'Click a point for full details.':'Click an area to see its collisions.'}</div>`;
 }
+
 export function temporalControls(meta,state,totals) {
   const t=state.temporal;
   const buttons=(key,year)=>meta.years.map(y=>`<button type="button" data-time-${key}="${y}" aria-pressed="${year instanceof Set?year.has(y):year===y}">${y}</button>`).join('');
@@ -25,7 +25,7 @@ export function temporalControls(meta,state,totals) {
 }
 export function temporalList(rows,state,nameOf) {
   const t=state.temporal;
-  return rows.map((b,i)=>`<li class="time-result ${state.selA?.hexId===b.id?'sel':''}" tabindex="0" role="button" data-hex="${b.id}" aria-label="Select ${esc(nameOf(b))}"><span class="rk">${i+1}</span><div><b>${esc(nameOf(b))}</b>
+  return rows.map((b,i)=>`<li class="time-result ${(state.selA?.hexIds||[state.selA?.hexId]).includes(b.id)?'sel':''}" tabindex="0" role="button" data-hex="${b.id}" aria-label="Select ${esc(nameOf(b))}"><span class="rk">${i+1}</span><div><b>${esc(nameOf(b))}</b>
     <strong class="time-difference ${t.mode==='compare'?(b.delta>0?'more':b.delta<0?'fewer':''):''}">${t.mode==='compare'?differenceWords(b.delta):`${b.after} collisions`}</strong>
-    <span class="time-counts">${t.mode==='compare'?`${t.from}: ${b.before} collisions · ${t.to}: ${b.after} collisions`:`Selected years: ${selectedYearWords(t)}`}</span></div></li>`).join('')||'<li class="empty">No locations match these filters.</li>';
+    <span class="time-counts">${t.mode==='compare'?`${t.from}: ${b.baselineBefore??b.before} collisions · ${t.to}: ${b.baselineAfter??b.after} collisions${b.before!==b.baselineBefore||b.after!==b.baselineAfter?`<br>${b.before+b.after} match the active filters`:''}`:`Selected years: ${selectedYearWords(t)}`}</span></div></li>`).join('')||'<li class="empty">No locations match these filters.</li>';
 }

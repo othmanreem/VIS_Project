@@ -13,7 +13,7 @@
 // --------------------------------------------------
 
 // Grouped values used by the charts. Index = value stored on each record.
-export const USERS = ["Vehicle occupant", "Pedestrian", "Cyclist", "Motorcyclist"];
+export const USERS = ["Vehicle occupant", "Pedestrian", "Cyclist", "Motorcyclist", "Other / unknown"];
 export const LIGHT = ["Daylight", "Dark – lit", "Dark – unlit", "Dark – unknown"];
 export const WEATHER = ["Fine", "Rain", "Snow / fog", "Other / unknown"];
 export const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -71,15 +71,14 @@ function groupByCollision(features) {
   return index;
 }
 
-// Most vulnerable road user among the casualties:
-// pedestrian, then cyclist, then motorcyclist, then vehicle occupant.
-function roadUserOf(casualties) {
-  const types = casualties.map((c) => String(c.casualty_type));
-  if (types.includes("0")) return 1;
-  if (types.includes("1")) return 2;
-  if (types.some((type) => MOTORCYCLE_TYPES.has(type))) return 3;
-  return 0;
+// One collision can involve several casualty road-user groups.
+export function roadUserGroups(casualties){
+  const occupant=new Set(['8','9','10','11','17','18','19','20','21']);
+  const groups=new Set();
+  for(const c of casualties){const type=String(c.casualty_type);groups.add(type==='0'?1:type==='1'?2:MOTORCYCLE_TYPES.has(type)?3:occupant.has(type)?0:4);}
+  return groups.size?[...groups]:[4];
 }
+function roadUserOf(casualties){const groups=roadUserGroups(casualties);return [1,2,3,0,4].find(g=>groups.includes(g));}
 
 function hourOf(time) {
   const match = String(time ?? "").match(/^(\d{1,2})\s*:/);
@@ -114,6 +113,7 @@ function toRecord(feature, i, vehicles, casualties) {
     cas: Number(p.number_of_casualties) || casualties.length,
     veh: Number(p.number_of_vehicles) || vehicles.length,
     user: roadUserOf(casualties),
+    users: roadUserGroups(casualties),
     yr: Number(p.collision_year),
     spd: META.speeds.indexOf(String(p.speed_limit)),
     light: LIGHT_GROUP[p.light_conditions] ?? 3,
