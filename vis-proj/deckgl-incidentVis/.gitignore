@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+.venv/
+exploratory_scripts_as_used/
+scripts/
+__pycache__/

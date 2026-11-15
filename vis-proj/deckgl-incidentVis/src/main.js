@@ -1,3 +1,4 @@
+import {renderProfiles} from './profiles.js';
 import { Deck, WebMercatorViewport } from "@deck.gl/core";
 import { BitmapLayer, PolygonLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { TileLayer } from "@deck.gl/geo-layers";
@@ -1021,6 +1022,17 @@ function renderCharts() {
   renderConditions($('condition-chart'),{records:F.filter(geo),scope,years:[...state.filters.yr].sort((a,b)=>a-b),active:state.patternHighlight,onPattern:togglePattern});
   renderSpeed($('speed-chart'),ctx);
   renderHeat($('heat-chart'),ctx);
+  const profileMetric=metric?.learnedProfile;
+  const profileRecords=F.filter(r=>geo(r)&&(profileMetric||condition(r)));
+  const areas=state.selB?comparisonSelections().map(sel=>({name:selName(sel),ids:new Set(selectionIds(sel))})):[{name:scope,ids:null}];
+  const years=[...state.filters.yr].sort((a,b)=>a-b);
+  const cells=areas.flatMap(a=>(state.temporal.mode==='compare'?years:[null]).map(y=>({label:`${a.name} · ${y??years.join(', ')}`,ids:profileRecords.filter(r=>(!a.ids||a.ids.has(r.i))&&(y===null||r.yr===y)).map(r=>String(r.feature.properties.collision_index))})));
+  renderProfiles({cells,active:state.patternHighlight?.label,onReset:()=>{state.patternHighlight=null;update();},onProfile:(label,members)=>{
+    let p=POINT_PATTERNS.find(p=>p.label===label);
+    if(!p){p={label,learnedProfile:true};POINT_PATTERNS.push(p);}
+    p.test=r=>members.has(String(r.feature.properties.collision_index));
+    togglePattern(label);
+  }});
 }
 
 // --------------------------------------------------
