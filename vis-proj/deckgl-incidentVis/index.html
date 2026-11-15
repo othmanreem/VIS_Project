@@ -9,8 +9,8 @@
 
 <body>
     <div id="app">
-        <!-- ============ Sidebar: summary, active filters, ranked hotspots ============ -->
-        <aside id="sidebar" aria-label="Hotspots and filters">
+        <!-- ============ Sidebar: summary, active filters, collision areas ============ -->
+        <aside id="sidebar" aria-label="Collision areas and filters">
             <div class="brand">
                 <span class="app-mark" aria-hidden="true">
                     <svg viewBox="0 0 32 32" fill="none">
@@ -35,26 +35,11 @@
 
             <div class="side-body">
                 <div class="sec-h"><h2>Where to look first</h2><span id="hs-count"></span></div>
-                <p class="hint" id="hs-hint">Dense collision areas, found automatically with DBSCAN. Hover a row to find it on the map. Click to select it.</p>
-                <div class="seg" id="sort" role="group" aria-label="Sort hotspots">
-                    <button type="button" data-sort="risk" aria-pressed="true">Risk score</button>
-                    <button type="button" data-sort="n" aria-pressed="false">Collisions</button>
-                    <button type="button" data-sort="ksi" aria-pressed="false">KSI %</button>
-                    <button type="button" data-sort="rising" aria-pressed="false">Rising</button>
-                </div>
+                <p class="hint" id="hs-hint">Select an area to inspect its recorded collisions.</p>
                 <ol class="rank" id="rank"></ol>
             </div>
 
-            <div class="side-foot">
-                <div class="sec-h">
-                    <span class="foot-label">Point colour</span>
-                    <div class="seg" id="colorby" role="group" aria-label="Point colour">
-                        <button type="button" data-c="year" aria-pressed="true">Year</button>
-                        <button type="button" data-c="sev" aria-pressed="false">Severity</button>
-                    </div>
-                </div>
-                <div class="key" id="key"></div>
-            </div>
+
         </aside>
 
         <main id="workspace">
@@ -69,7 +54,6 @@
                     <button type="button" class="tool" data-mode="lasso" aria-pressed="false">◌ Lasso area</button>
                     <button type="button" class="tool" data-mode="box" aria-pressed="false">▭ Box</button>
                     <label class="tool points-switch" id="points-switch"><input type="checkbox" id="show-bin-points" role="switch" aria-label="Show all collision points"><span class="switch-track" aria-hidden="true"></span>All points</label>
-                    <button type="button" class="tool" id="hex-button" aria-pressed="false">⬡ Hexagons</button>
                 </div>
 
                 <div class="zoom">

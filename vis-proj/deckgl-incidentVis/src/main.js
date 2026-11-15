@@ -3,7 +3,7 @@ import { Deck, WebMercatorViewport } from "@deck.gl/core";
 import { BitmapLayer, PolygonLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { TileLayer } from "@deck.gl/geo-layers";
 import { META, USERS, LIGHT, WEATHER, DAYS, SEVERITY_NAMES, loadAllData } from "./data.js";
-import { findHotspots, inPolygon } from "./hotspots.js";
+import { inPolygon } from "./hotspots.js";
 import { createPlaceNamer } from "./placeNames.js";
 import { createDetailsPanel, escapeHtml } from "./details.js";
 import { renderSpeed, renderHeat, ksiShare, fmt } from "./charts.js";
@@ -16,8 +16,8 @@ import { buildConcentrations, compareConcentrations } from "./concentrations.js"
 import { temporalControls, temporalList, differenceWords, selectedYearWords, temporalLegend } from "./temporal.js";
 
 // ==================================================
-// Hotspot explorer
-// 1. Sidebar ranks automatically found hotspots (DBSCAN).
+// Collision area explorer
+// 1. Sidebar lists fixed hexagon areas for the selected years.
 // 2. Selecting a hotspot, or drawing a lasso / box, opens a card
 //    that profiles the area against all matching collisions
 //    (or against a second, compared area).
@@ -46,7 +46,7 @@ const state = {
   mode: "select", // select | lasso | box
   hex: true,
   showPoints:false, extraAreas:[], pickExtra:false, multiHex:false, editArea:"A", savedComparisons:[], nextAreaNumber:1, patternHighlight:null,
-  temporal: { mode:"compare", from:2020, to:2025, size:500, years:new Set([2025]) },
+  temporal: { mode:"year", from:2020, to:2025, size:500, years:new Set([2025]) },
   groupFocus:null,
   patternGroup:null,
   colorBy: "sev",
@@ -776,20 +776,13 @@ function renderHeader() {
   if (count) html += `<span class="chip clear"><button type="button" data-clear-all="1">Clear all filters</button></span>`;
   $("chips").innerHTML = html;
 
-  if (state.colorBy === "year") {
-    $("key").innerHTML = META.years.map((year) => `<button type="button" data-year="${year}" aria-pressed="${!state.filters.yr.size || state.filters.yr.has(year)}" title="Click to show only this year; click more years to add them">
-      <span class="dot" style="background:rgb(${META.yearColors[year].join(",")})"></span>${year}</button>`).join("");
-  } else {
-    $("key").innerHTML = SEVERITY_NAMES.map((name, i) => `<span><span class="dot" style="background:rgb(${SEVERITY_RGB[i].join(",")})"></span>${name}</span>`).join("");
-  }
-  document.querySelectorAll("#colorby [data-c]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.c === state.colorBy)));
+
 }
 
 function renderTemporal() {
   const controls=$("temporal-controls"),caption=$("time-map-caption");
   if(!controls)return;
   controls.hidden=!state.hex;caption.hidden=!state.hex;
-  document.querySelector(".side-foot").hidden=state.hex;
   if(!state.hex)return;
   const wasOpen=controls.querySelector("details")?.open;
   controls.innerHTML=temporalControls(META,state,temporalTotals);
@@ -798,7 +791,6 @@ function renderTemporal() {
 }
 
 function renderRank() {
-  $("sort").hidden=state.hex;
   $("rank").classList.toggle("time-list",state.hex);
   document.querySelector(".side-body .sec-h h2").textContent=state.hex?(state.temporal.mode==="compare"?"Where collisions increased or decreased":"Where most collisions occurred"):"Where to look first";
   if(state.hex){
@@ -1003,7 +995,7 @@ function renderAreaWorkspace(){
       const saved=state.savedComparisons.find(a=>a.id===id);if(!saved)return;
       const snapshot=structuredClone(saved.snapshot);
       if(snapshot.temporal.size!==state.temporal.size){geographicalHexagons=buildConcentrations(P,META.years,snapshot.temporal.size);classificationKey='';}
-      Object.assign(state,snapshot);state.patternHighlight=null;state.multiHex=false;state.editArea='A';state.pickB=false;state.pickExtra=false;state.drawer=false;
+      Object.assign(state,snapshot);state.hex=true;state.patternHighlight=null;state.multiHex=false;state.editArea='A';state.pickB=false;state.pickExtra=false;state.drawer=false;
       update();zoomToSelection();
     },
     onRemove:id=>{state.savedComparisons=state.savedComparisons.filter(a=>a.id!==id);renderAreaWorkspace();}
@@ -1071,8 +1063,6 @@ function renderNote() {
   $("show-bin-points").hidden=!state.hex;
   $("show-bin-points").checked=state.showPoints;
   $("points-switch").hidden=!state.hex;
-  $("hex-button").setAttribute("aria-pressed", String(state.hex));
-  $("hex-button").textContent=state.hex?"Show individual collisions":"Show hexagon areas";
   overlay.classList.toggle("drawing", state.mode !== "select");
 }
 
@@ -1117,36 +1107,6 @@ document.querySelectorAll(".tool[data-mode]").forEach((button) => button.addEven
   renderNote();
 }));
 $("show-bin-points").addEventListener("change", event => {state.showPoints=event.target.checked;update();});
-$("hex-button").addEventListener("click", () => {
-  state.hex = !state.hex;
-  if(!state.hex)state.filters.yr.clear();
-  state.selA=state.selB=null;state.extraAreas=[];state.pickExtra=false;
-  hideTip();
-  update();
-  fitBounds(META.bounds,false);
-});
-$("sort").addEventListener("click", (event) => {
-  const sort = event.target.closest("[data-sort]")?.dataset.sort;
-  if (!sort) return;
-  state.sort = sort;
-  version += 1;
-  computeHotspotStats();
-  renderRank();
-  scheduleFrame();
-});
-$("colorby").addEventListener("click", (event) => {
-  const colorBy = event.target.closest("[data-c]")?.dataset.c;
-  if (!colorBy) return;
-  state.colorBy = colorBy;
-  version += 1;
-  renderHeader();
-  scheduleFrame();
-});
-$("key").addEventListener("click", (event) => {
-  const year = Number(event.target.closest("[data-year]")?.dataset.year);
-  if (year) toggleFilter("yr", year);
-});
-
 const rank = $("rank");
 rank.addEventListener("click", (event) => {
   const hex=event.target.closest("[data-hex]")?.dataset.hex;
@@ -1305,7 +1265,7 @@ async function start() {
   $("zoom-home").setAttribute("aria-label", `Show all of ${META.name}`);
 
   namer = createPlaceNamer({ enabled: META.useOpenStreetMap, onName: () => renderAll() });
-  HS = findHotspots(P, META.hotspots);
+  HS = [];
   setView(overviewView(), false);
   $("hs-hint").textContent = `Dense collision areas, found automatically (DBSCAN: at least ${META.hotspots.minCollisions} collisions within ${META.hotspots.radiusMetres} m). Hover a row to find it on the map. Click to select it.`;
   $("loading").hidden = true;

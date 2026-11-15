@@ -17,7 +17,7 @@ export function temporalLegend(state, rows, countMax, severityRGB, comparisonMax
 export function temporalControls(meta,state,totals) {
   const t=state.temporal;
   const buttons=(key,year)=>meta.years.map(y=>`<button type="button" data-time-${key}="${y}" aria-pressed="${year instanceof Set?year.has(y):year===y}">${y}</button>`).join('');
-  return `<div class="time-modes seg" aria-label="What the map shows"><button data-time-mode="compare" aria-pressed="${t.mode==='compare'}">Compare two years</button><button data-time-mode="year" aria-pressed="${t.mode==='year'}">Show selected years</button></div>
+  return `<div class="time-modes seg" aria-label="What the map shows"><button data-time-mode="year" aria-pressed="${t.mode==='year'}">Show selected years</button><button data-time-mode="compare" aria-pressed="${t.mode==='compare'}">Compare two years</button></div>
     ${t.mode==='compare'?`<div class="time-year-label">Compare from</div><div class="time-years">${buttons('from',t.from)}</div>`:''}
     <div class="time-year-label">${t.mode==='compare'?'Compare to':'Years to show · select one or more'}</div><div class="time-years">${t.mode==='compare'?buttons('to',t.to):buttons('years',t.years)}</div>
     <p class="time-totals">${t.mode==='compare'?`${t.from}: <b>${totals[meta.years.indexOf(t.from)]||0}</b> collisions · ${t.to}: <b>${totals[meta.years.indexOf(t.to)]||0}</b> collisions`:`<b>${meta.years.reduce((n,y,i)=>n+(t.years.has(y)?totals[i]:0),0)}</b> collisions in ${selectedYearWords(t)} <button class="time-all" data-time-all="1">All years</button>`}</p>

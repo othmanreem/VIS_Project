@@ -63,7 +63,7 @@ In a second terminal, run the same frontend command shown above.
 ## Verify the system
 
 1. Confirm that the map and existing charts load.
-2. Choose comparison years or use **Show selected years**.
+2. **Show selected years** opens by default with the latest year selected. Add more years, or switch to **Compare two years**.
 3. Scroll to **Patterns in this selection**. A loader appears while the backend fits and checks groups. New selections can take several seconds; the other charts remain usable.
 4. Select an area or change a filter. The patterns update for those records. Compared areas/years share one jointly fitted model.
 5. Click a profile to highlight its collisions; click again to clear it.
@@ -88,3 +88,5 @@ If a development-tool integration prevents the normal Vite command from starting
 ```powershell
 node --input-type=module -e "import {createServer} from 'vite'; const s=await createServer({server:{host:'127.0.0.1',port:5173,strictPort:true}}); await s.listen(); s.printUrls();"
 ```
+
+The separate legacy DBSCAN/risk-ranking view has been removed. Use the **All points** switch or select a hexagon/drawn area to inspect individual collision records.
