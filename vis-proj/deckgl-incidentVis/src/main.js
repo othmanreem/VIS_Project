@@ -108,7 +108,7 @@ function toggleFilter(key, value) {
   if(state.selA)zoomToSelection();
 }
 
-function inFocusedGroup(record){return !state.groupFocus||areaClassification?.membership.get(record.i)===state.groupFocus;}
+function inFocusedGroup(record){return state.temporal.mode!=="compare"||!state.groupFocus||areaClassification?.membership.get(record.i)===state.groupFocus;}
 
 function computeTemporalStats() {
   if (!geographicalHexagons.length) return;
@@ -176,7 +176,7 @@ function selectHex(id) {
 function selPoints(sel) {
   if (!sel) return [];
   const ids = sel.type === "hotspot" ? HS[sel.id].members : sel.ids;
-  return ids.filter((i) => inF.has(i)).map((i) => P[i]);
+  return ids.filter((i) => inF.has(i)).map((i) => P[i]).filter(inFocusedGroup);
 }
 
 // --------------------------------------------------
@@ -491,7 +491,7 @@ function buildLayers() {
       // Slight first, so serious and fatal collisions are drawn on top.
       // Details on demand: reveal the actual collision locations in selected
       // hexagons or drawn areas without replacing the geographical overview.
-      data: drawOrder.filter(r=>!state.hex||state.showPoints||A?.has(r.i)||B?.has(r.i)||extraIds.has(r.i)||(metric&&highlighted(r))).sort((a,b)=>Number(highlighted(a))-Number(highlighted(b))||b.sev-a.sev),
+      data: drawOrder.filter(r=>(!state.hex||inFocusedGroup(r))&&(!state.hex||state.showPoints||A?.has(r.i)||B?.has(r.i)||extraIds.has(r.i)||(metric&&highlighted(r)))).sort((a,b)=>Number(highlighted(a))-Number(highlighted(b))||b.sev-a.sev),
       getPosition: (r) => r.position,
       getRadius: (r) => ((A && A.has(r.i)) || (B && B.has(r.i)) ? radius + 0.6 : radius) + (metric&&highlighted(r)?2:0),
       radiusUnits: "pixels",
@@ -968,7 +968,7 @@ function renderGroups() {
     renderGroupAnalysis(root,{groups:groupProfiles,state,year:state.temporal.to,scope,records,
       allMatching:new Set(selectedRecords.map(r=>r.i)),recordById:new Map(P.map(r=>[r.i,r])),
       areaName:b=>b.road?`Near ${b.road}`:"Local roads",onArea:selectHex,onPattern:togglePattern,
-      onFocus:id=>{state.groupFocus=id;state.patternGroup=id;state.selA=state.selB=null;state.extraAreas=[];state.pickExtra=false;state.pickB=false;state.drawer=false;state.patternHighlight=null;update();fitBounds(META.bounds);}
+      onFocus:id=>{state.groupFocus=id;state.patternGroup=id;state.pickExtra=false;state.pickB=false;state.drawer=false;state.patternHighlight=null;update();}
     });
   }
   const hint=document.createElement('div');hint.className='pattern-highlight-control';
