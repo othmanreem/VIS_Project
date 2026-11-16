@@ -112,22 +112,20 @@ function inFocusedGroup(record){return state.temporal.mode!=="compare"||!state.g
 
 function computeTemporalStats() {
   if (!geographicalHexagons.length) return;
-  const scopeIds=analysisScopeIds();
-  const bins=geographicalHexagons.map(b=>{
-    const members=b.members.filter(i=>(!scopeIds||scopeIds.has(i))&&passes(P[i],"yr"));
-    return {...b,members,counts:META.years.map(y=>members.reduce((sum,i)=>sum+(P[i].yr===y?1:0),0))};
-  });
-  // Classify the same scoped, filtered records used by the map and analytics.
-  areaClassification=classifyAreaGroups(bins,META.years,state.temporal.from,state.temporal.to);
+  const key=`${state.temporal.size}:${state.temporal.from}:${state.temporal.to}`;
+  if(key!==classificationKey){areaClassification=classifyAreaGroups(geographicalHexagons,META.years,state.temporal.from,state.temporal.to);classificationKey=key;}
+  const bins=geographicalHexagons.map(b=>({...b, counts:META.years.map(y=>b.members.reduce((sum,i)=>sum+(P[i].yr===y&&passes(P[i],"yr")?1:0),0))}));
   const t=state.temporal, result=compareConcentrations(bins,META.years,t.from,t.to);
   temporalTotals=result.totals;
   temporalAnnualMax=Math.max(1,...result.rows.flatMap(b=>b.counts));
   temporalCountMax=t.years.size===1?temporalAnnualMax:Math.max(1,...result.rows.map(b=>META.years.reduce((sum,y,i)=>sum+(t.years.has(y)?b.counts[i]:0),0)));
   temporalData=result.rows.map(b=>({...b,before:b.counts[META.years.indexOf(t.from)],after:t.mode==="compare"?b.counts[META.years.indexOf(t.to)]:META.years.reduce((sum,y,i)=>sum+(t.years.has(y)?b.counts[i]:0),0)})).filter(b=>t.mode==="compare"?b.before||b.after:b.after);
-  if(t.mode==="compare")temporalData=temporalData.map(b=>({...b,
-    baselineBefore:b.before,baselineAfter:b.after,delta:b.after-b.before,
-    group:areaClassification.areas.get(b.id)}));
-  comparisonDeltaMax=Math.max(1,...temporalData.map(b=>Math.abs(b.delta||0)));
+  if(t.mode==="compare")temporalData=temporalData.map(b=>{
+    const original=geographicalHexagons.find(g=>g.id===b.id);
+    const baselineBefore=original.counts[META.years.indexOf(t.from)],baselineAfter=original.counts[META.years.indexOf(t.to)];
+    return {...b,baselineBefore,baselineAfter,delta:baselineAfter-baselineBefore,group:areaClassification.areas.get(b.id)};
+  });
+  comparisonDeltaMax=Math.max(1,...geographicalHexagons.map(b=>Math.abs(b.counts[META.years.indexOf(t.to)]-b.counts[META.years.indexOf(t.from)])));
   const deltaMax=comparisonDeltaMax;
   const countRamp=[[245,222,178],[223,174,106],[193,124,57],[149,82,35],[102,48,24]];
   // Store colours with this data snapshot. GPU accessors must not read a later
@@ -796,8 +794,8 @@ function renderRank() {
   $("rank").classList.toggle("time-list",state.hex);
   document.querySelector(".side-body .sec-h h2").textContent=state.hex?(state.temporal.mode==="compare"?"Where collisions increased or decreased":"Where most collisions occurred"):"Where to look first";
   if(state.hex){
-    $("hs-count").textContent=`${(state.groupFocus&&state.temporal.mode==="compare"?temporalData.filter(b=>b.group===state.groupFocus):temporalData).length} areas`;
-    $("hs-hint").textContent=state.temporal.mode==="compare"?`${temporalData.filter(b=>b.delta>0).length} areas recorded more collisions; ${temporalData.filter(b=>b.delta<0).length} recorded fewer. Largest differences are listed below. Uses the current area and filters.`:`Areas with the most recorded collisions in ${selectedYearWords(state.temporal)}. Numbers match the map.`;
+    $("hs-count").textContent=`${temporalData.length} areas`;
+    $("hs-hint").textContent=state.temporal.mode==="compare"?`${temporalData.filter(b=>b.delta>0).length} areas recorded more collisions; ${temporalData.filter(b=>b.delta<0).length} recorded fewer. Largest differences are listed below. Numbers match the map.`:`Areas with the most recorded collisions in ${selectedYearWords(state.temporal)}. Numbers match the map.`;
     $("rank").innerHTML=temporalList(temporalRank,state,hexName);
     return;
   }
