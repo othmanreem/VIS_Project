@@ -8,7 +8,7 @@ import { createPlaceNamer } from "./placeNames.js";
 import { createDetailsPanel, escapeHtml } from "./details.js";
 import { renderSpeed, renderHeat, ksiShare, fmt } from "./charts.js";
 import "./style.css";
-import {renderUserYears,renderConditions} from "./municipalCharts.js";
+import {renderUserYears,renderConditions,renderCombinations,matchesCombination,combinationLabel} from "./municipalCharts.js";
 import { classifyAreaGroups, profileAreaGroups, PATTERN_METRICS, RQ3_METRICS } from "./areaGroups.js";
 import { renderSavedComparisons, renderComparison } from "./areaWorkspace.js";
 import { renderGroupAnalysis, renderSelectedYearsAnalysis } from "./groupAnalysis.js";
@@ -26,6 +26,7 @@ import { temporalControls, temporalList, temporalRankBadge, differenceWords, sel
 // ==================================================
 
 const POINT_PATTERNS=[...PATTERN_METRICS,...RQ3_METRICS];
+const conditionByLabel = new Map(RQ3_METRICS.map(metric => [metric.label, metric]));
 const $ = (id) => document.getElementById(id);
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const hexToRgb = (hex) => {
@@ -38,7 +39,7 @@ const hexToRgb = (hex) => {
 // State
 // --------------------------------------------------
 const state = {
-  filters: { user: new Set(), light: new Set(), wx: new Set(), spd: new Set(), cell: new Set(), yr: new Set() },
+  filters: { combination: new Set(), user: new Set(), light: new Set(), wx: new Set(), spd: new Set(), cell: new Set(), yr: new Set() },
   selA: null, // { type: "hotspot", id } or { type: "area", tool, poly, ids, label }
   selB: null, // second area for comparison
   areaHighlight: null,
@@ -84,7 +85,21 @@ function passes(record, skip = null) {
     }
   }
   if (!skipped("cell") && state.filters.cell.size && !state.filters.cell.has(`${record.dow}-${record.hr}`)) return false;
+  const combination = activeCombination();
+  if (!skipped("combination") && combination && !matchesCombination(record, combination)) return false;
+  const condition = conditionByLabel.get(state.patternHighlight?.label);
+  if (!skipped("condition") && condition && condition.test(record) === state.patternHighlight.other) return false;
   return true;
+}
+
+function activeCombination() {
+  return state.filters.combination?.values().next().value;
+}
+
+function selectCombination(key) {
+  const previous = activeCombination();
+  state.filters.combination = new Set(previous === key ? [] : [key]);
+  update();
 }
 
 function recompute() {
@@ -496,11 +511,12 @@ function buildLayers() {
     }));
   }
 
-  if (!state.hex || state.showPoints || anySelection || state.patternHighlight) {
+  const combination = activeCombination();
+  if (!state.hex || state.showPoints || anySelection || state.patternHighlight || combination) {
     const radius = pointRadius();
     const metric=POINT_PATTERNS.find(m=>m.label===state.patternHighlight?.label);
     const highlighted = r => areaMatchIds ? areaMatchIds.has(r.i) : !metric || ((!scopeIds||scopeIds.has(r.i)) && inFocusedGroup(r) && (state.patternHighlight.other ? !metric.test(r) : metric.test(r)));
-    const points = drawOrder.filter(r=>(!state.hex||inFocusedGroup(r))&&(!state.hex||state.showPoints||A?.has(r.i)||B?.has(r.i)||extraIds.has(r.i)||(metric&&highlighted(r))));
+    const points = drawOrder.filter(r=>(!state.hex||inFocusedGroup(r))&&(!state.hex||state.showPoints||A?.has(r.i)||B?.has(r.i)||extraIds.has(r.i)||(combination&&(!scopeIds||scopeIds.has(r.i)))||(metric&&highlighted(r))));
     layers.push(new ScatterplotLayer({
       id: state.hex ? `selected-collisions-${version}` : "collisions",
       // Slight first, so serious and fatal collisions are drawn on top.
@@ -759,6 +775,7 @@ function hideTip() {
 // Sidebar
 // --------------------------------------------------
 const FILTER_LABEL = {
+  combination: combinationLabel,
   user: (v) => USERS[v],
   light: (v) => LIGHT[v],
   wx: (v) => WEATHER[v],
@@ -777,7 +794,8 @@ function yearRange() {
 
 function renderHeader() {
   $("kpi-n").textContent = fmt(F.length);
-  const count = Object.entries(state.filters).reduce((sum, [key,set]) => sum + (state.hex&&key==="yr"?0:key==="cell"?Number(set.size>0):set.size), 0);
+  const conditionActive = conditionByLabel.has(state.patternHighlight?.label);
+  const count = Number(conditionActive) + Object.entries(state.filters).reduce((sum, [key,set]) => sum + (state.hex&&key==="yr"?0:key==="cell"?Number(set.size>0):set.size), 0);
   $("kpi-sub").textContent = count
     ? `of ${fmt(P.length)} · ${count} filter${count > 1 ? "s" : ""} active`
     : state.hex ? (state.temporal.mode==="compare"?`${state.temporal.from} and ${state.temporal.to} combined`:`Years ${selectedYearWords(state.temporal)}`) : `${yearRange()} · all collisions`;
@@ -794,6 +812,7 @@ function renderHeader() {
     }
     set.forEach(value=>{html+=`<span class="chip">${escapeHtml(FILTER_LABEL[key](value))}<button type="button" data-unfilter="${key}|${value}" aria-label="Remove filter">×</button></span>`;});
   });
+  if (conditionActive) html += `<span class="chip">${escapeHtml(patternName())}<button type="button" data-clear-condition aria-label="Clear condition">×</button></span>`;
   if (count) html += `<span class="chip clear"><button type="button" data-clear-all="1">Clear all filters</button></span>`;
   $("chips").innerHTML = html;
 
@@ -954,17 +973,20 @@ function renderCard() {
 // --------------------------------------------------
 // Records table
 // --------------------------------------------------
-const COLUMNS = [["date", "Date"], ["time", "Time"], ["sev", "Severity"], ["cas", "Casualties"], ["user", "Road user"], ["spd", "Limit"], ["light", "Light"], ["road", "Road"]];
+const COLUMNS = [["date", "Date"], ["time", "Time"], ["sev", "Collision severity"], ["cas", "Casualties"], ["user", "Primary casualty group"], ["spd", "Limit"], ["light", "Light"], ["road", "Road"]];
 
 function renderTable() {
   const drawer = $("drawer");
-  drawer.hidden = !state.drawer || (!state.selA&&!state.patternHighlight);
+  const combination = activeCombination();
+  drawer.hidden = !state.drawer || (!state.selA&&!state.patternHighlight&&!combination);
   $("map-pane").classList.toggle("has-drawer", !drawer.hidden);
   if (drawer.hidden) return;
-  const rows = (patternRecords() || selPoints(state.selA)).slice();
+  const ids = analysisScopeIds();
+  const combinedRows = combination ? F.filter(record => (!ids || ids.has(record.i)) && inFocusedGroup(record)) : null;
+  const rows = (patternRecords() || combinedRows || selPoints(state.selA)).slice();
   const { key, dir } = state.tableSort;
   rows.sort((a, b) => (a[key] > b[key] ? 1 : a[key] < b[key] ? -1 : 0) * dir);
-  $("drawer-title").textContent = `${rows.length} collisions · ${state.patternHighlight?patternName():selName(state.selA)}`;
+  $("drawer-title").textContent = `${rows.length} collisions · ${combination ? combinationLabel(combination) : state.patternHighlight ? patternName() : selName(state.selA)}`;
   $("thead").innerHTML = `<tr>${COLUMNS.map(([k, label]) => `<th><button type="button" data-table-sort="${k}">${label}${k === key ? (dir > 0 ? " ▲" : " ▼") : ""}</button></th>`).join("")}</tr>`;
   $("tbody").innerHTML = rows.map((r) => `<tr data-record="${r.i}">
     <td>${escapeHtml(r.date)}</td><td>${escapeHtml(r.time)}</td>
@@ -1030,7 +1052,7 @@ function renderGroups() {
     hint.innerHTML=`<span><b>${n} points emphasised</b> · ${escapeHtml(metric.label)} ${state.patternHighlight.other?'— other collisions':'— matching collisions'}</span><button data-pattern-other>${state.patternHighlight.other?'Highlight matching':'Highlight the others'}</button><button data-pattern-clear>Clear highlight</button>`;
     hint.querySelector('[data-pattern-other]').onclick=()=>{state.patternHighlight.other=!state.patternHighlight.other;update();};
     hint.querySelector('[data-pattern-clear]').onclick=()=>{state.patternHighlight=null;update();};
-  }else hint.textContent='Click a circumstance to highlight its collision points. Counts and filters stay unchanged.';
+  }else hint.textContent='Select a chart category to explore its matching collisions.';
   root.querySelector('.pattern-changes').after(hint);
 }
 function saveComparison(){
@@ -1063,13 +1085,24 @@ function renderCharts() {
   const scope=state.selB?`${comparisonSelections().length} selected areas`:state.selA?selName(state.selA):state.groupFocus?`${state.groupFocus==='same'?'Same-count':state.groupFocus==='more'?'More-collision':'Fewer-collision'} areas`:'All Calderdale';
   const showYear=year=>{state.temporal.mode='year';state.temporal.years=new Set([year]);state.groupFocus=null;state.patternGroup=null;update();};
   renderUserYears($('risk-chart'),{records:annual,years:[...state.filters.yr].sort((a,b)=>a-b).length?[...state.filters.yr].sort((a,b)=>a-b):META.years,activeYears:state.filters.yr,scope:scope+(metric?` · ${patternName()}`:''),users:USERS,activeUsers:state.filters.user,onUser:u=>toggleFilter('user',u),onYear:showYear,areaScopes:state.selB?comparisonSelections().map(sel=>({name:selName(sel),records:P.filter(r=>passes(r,['yr','user'])&&selectionIds(sel).includes(r.i)&&condition(r))})):null});
-  renderConditions($('condition-chart'),{records:F.filter(geo),scope,years:[...state.filters.yr].sort((a,b)=>a-b),active:state.patternHighlight,onPattern:togglePattern});
+  const years = [...state.filters.yr].sort((a,b)=>a-b);
+  renderCombinations($("combination-chart"), {
+    records: P.filter(record => passes(record, "combination") && geo(record) && condition(record)),
+    scope,
+    years: years.length ? years : META.years,
+    active: activeCombination(),
+    onSelect: selectCombination,
+    onRecords: () => { state.drawer = true; renderTable(); scheduleFrame(); },
+  });
+  renderConditions($("condition-chart"), {
+    records: P.filter(record => passes(record, "condition") && geo(record)),
+    scope, years, active: state.patternHighlight, onPattern: togglePattern,
+  });
   renderSpeed($('speed-chart'),ctx);
   renderHeat($('heat-chart'),ctx);
   const profileMetric=metric?.learnedProfile;
   const profileRecords=F.filter(r=>geo(r)&&(profileMetric||condition(r)));
   const areas=state.selB?comparisonSelections().map(sel=>({name:selName(sel),ids:new Set(selectionIds(sel))})):[{name:scope,ids:null}];
-  const years=[...state.filters.yr].sort((a,b)=>a-b);
   const cells=areas.flatMap(a=>(state.temporal.mode==='compare'?years:[null]).map(y=>({label:`${a.name} · ${y??years.join(', ')}`,ids:profileRecords.filter(r=>(!a.ids||a.ids.has(r.i))&&(y===null||r.yr===y)).map(r=>String(r.feature.properties.collision_index))})));
   renderProfiles({cells,active:state.patternHighlight?.label,onReset:()=>{state.patternHighlight=null;update();},onProfile:(label,members)=>{
     let p=POINT_PATTERNS.find(p=>p.label===label);
@@ -1187,6 +1220,11 @@ rank.addEventListener("mouseleave", () => {
 });
 
 $("chips").addEventListener("click", (event) => {
+  if (event.target.closest("[data-clear-condition]")) {
+    state.patternHighlight = null;
+    update();
+    return;
+  }
   if(event.target.closest("[data-clear-time]")){state.filters.cell.clear();update();return;}
   const clear = event.target.closest("[data-clear]")?.dataset.clear;
   if(clear==='A'||clear==='B'){
@@ -1197,12 +1235,13 @@ $("chips").addEventListener("click", (event) => {
   const remove = event.target.closest("[data-unfilter]")?.dataset.unfilter;
   if (remove) {
     const [key, value] = remove.split("|");
-    state.filters[key].delete(key === "cell" ? value : Number(value));
+    state.filters[key].delete(["cell", "combination"].includes(key) ? value : Number(value));
     update();
     return;
   }
   if (event.target.closest("[data-clear-all]")) {
     Object.values(state.filters).forEach((set) => set.clear());
+    if (conditionByLabel.has(state.patternHighlight?.label)) state.patternHighlight = null;
     update();
   }
 });
