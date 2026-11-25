@@ -71,13 +71,33 @@ function groupByCollision(features) {
   return index;
 }
 
-// One collision can involve several casualty road-user groups.
-export function roadUserGroups(casualties){
-  const occupant=new Set(['8','9','10','11','17','18','19','20','21']);
-  const groups=new Set();
-  for(const c of casualties){const type=String(c.casualty_type);groups.add(type==='0'?1:type==='1'?2:MOTORCYCLE_TYPES.has(type)?3:occupant.has(type)?0:4);}
-  return groups.size?[...groups]:[4];
+function casualtyRoadUser(casualty) {
+  const type = String(casualty.casualty_type);
+  if (type === "0") return 1;
+  if (type === "1") return 2;
+  if (MOTORCYCLE_TYPES.has(type)) return 3;
+  return OCCUPANT_TYPES.has(type) ? 0 : 4;
 }
+
+const OCCUPANT_TYPES = new Set(["8", "9", "10", "11", "17", "18", "19", "20", "21"]);
+
+// One collision can involve several casualty road-user groups.
+export function roadUserGroups(casualties) {
+  const groups = new Set(casualties.map(casualtyRoadUser));
+  return groups.size ? [...groups] : [4];
+}
+
+export function casualtyOutcomes(casualties) {
+  const outcomes = new Set();
+  for (const casualty of casualties) {
+    const severity = Number(casualty.casualty_severity);
+    if ([1, 2, 3].includes(severity)) {
+      outcomes.add(`${casualtyRoadUser(casualty)}-${severity}`);
+    }
+  }
+  return outcomes;
+}
+
 function roadUserOf(casualties){const groups=roadUserGroups(casualties);return [1,2,3,0,4].find(g=>groups.includes(g));}
 
 function hourOf(time) {
@@ -106,6 +126,7 @@ function toRecord(feature, i, vehicles, casualties) {
     feature,
     vehicles,
     casualties,
+    casualtyOutcomes: casualtyOutcomes(casualties),
     lon,
     lat,
     position: [lon, lat],
