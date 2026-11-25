@@ -8,7 +8,7 @@ import { createPlaceNamer } from "./placeNames.js";
 import { createDetailsPanel, escapeHtml } from "./details.js";
 import { renderSpeed, renderHeat, ksiShare, fmt } from "./charts.js";
 import "./style.css";
-import {renderUserYears,renderConditions} from "./municipalCharts.js";
+import {renderUserSeverity,renderConditions} from "./municipalCharts.js";
 import { classifyAreaGroups, profileAreaGroups, PATTERN_METRICS, RQ3_METRICS } from "./areaGroups.js";
 import { renderSavedComparisons, renderComparison } from "./areaWorkspace.js";
 import { renderGroupAnalysis, renderSelectedYearsAnalysis } from "./groupAnalysis.js";
@@ -42,6 +42,8 @@ const state = {
   selA: null, // { type: "hotspot", id } or { type: "area", tool, poly, ids, label }
   selB: null, // second area for comparison
   areaHighlight: null,
+  roadUserYear: null,
+  mapSeverity: null,
   pickB: false, // waiting for the user to pick the second area
   mode: "select", // select | lasso | box
   hex: true,
@@ -496,11 +498,19 @@ function buildLayers() {
     }));
   }
 
-  if (!state.hex || state.showPoints || anySelection || state.patternHighlight) {
+  const drilldownYear = state.roadUserYear;
+  const severity = state.mapSeverity;
+  const showAnalysisPoints = (drilldownYear !== null || severity !== null) && !anySelection && !state.patternHighlight;
+  if (!state.hex || state.showPoints || anySelection || state.patternHighlight || showAnalysisPoints) {
     const radius = pointRadius();
     const metric=POINT_PATTERNS.find(m=>m.label===state.patternHighlight?.label);
-    const highlighted = r => areaMatchIds ? areaMatchIds.has(r.i) : !metric || ((!scopeIds||scopeIds.has(r.i)) && inFocusedGroup(r) && (state.patternHighlight.other ? !metric.test(r) : metric.test(r)));
-    const points = drawOrder.filter(r=>(!state.hex||inFocusedGroup(r))&&(!state.hex||state.showPoints||A?.has(r.i)||B?.has(r.i)||extraIds.has(r.i)||(metric&&highlighted(r))));
+    const matchesSelection = r => areaMatchIds ? areaMatchIds.has(r.i) : !metric || ((!scopeIds||scopeIds.has(r.i)) && inFocusedGroup(r) && (state.patternHighlight.other ? !metric.test(r) : metric.test(r)));
+    const highlighted = r => (drilldownYear === null || r.yr === drilldownYear) && matchesSelection(r);
+    const fade = areaMatchIds || drilldownYear !== null;
+    const points = drawOrder.filter(r => (severity === null || r.sev === severity) && (!state.hex || inFocusedGroup(r)) && (
+      !state.hex || state.showPoints || A?.has(r.i) || B?.has(r.i) || extraIds.has(r.i)
+      || (metric && matchesSelection(r)) || showAnalysisPoints
+    ));
     layers.push(new ScatterplotLayer({
       id: state.hex ? `selected-collisions-${version}` : "collisions",
       // Slight first, so serious and fatal collisions are drawn on top.
@@ -508,11 +518,11 @@ function buildLayers() {
       // hexagons or drawn areas without replacing the geographical overview.
       data: points.sort((a,b)=>Number(highlighted(a))-Number(highlighted(b))||b.sev-a.sev),
       getPosition: (r) => r.position,
-      getRadius: (r) => ((A && A.has(r.i)) || (B && B.has(r.i)) ? radius + 0.6 : radius) + ((metric || areaMatchIds) && highlighted(r) ? 2 : 0),
+      getRadius: (r) => ((A && A.has(r.i)) || (B && B.has(r.i)) ? radius + 0.6 : radius) + ((metric || fade) && highlighted(r) ? 2 : 0),
       radiusUnits: "pixels",
-      getFillColor: (r) => pointColor(r).concat(highlighted(r) ? 242 : areaMatchIds ? 150 : 24),
+      getFillColor: (r) => pointColor(r).concat(highlighted(r) ? 242 : fade ? 150 : 24),
       stroked: true,
-      getLineColor: r=>[255,254,250,highlighted(r) ? 230 : areaMatchIds ? 150 : 20],
+      getLineColor: r=>[255,254,250,highlighted(r) ? 230 : fade ? 150 : 20],
       getLineWidth: () => 0.8,
       lineWidthUnits: "pixels",
       pickable: true,
@@ -526,7 +536,7 @@ function buildLayers() {
     }));
 
     const ring = ringRecord ?? (state.hoverPt != null ? P[state.hoverPt] : null);
-    if (ring && inF.has(ring.i)) {
+    if (ring && inF.has(ring.i) && (severity === null || ring.sev === severity)) {
       layers.push(new ScatterplotLayer({
         id: "ring",
         data: [ring],
@@ -571,11 +581,15 @@ function onHover(info) {
   }
 }
 
+function collisionLocationGroup(record) {
+  return F.filter(r => r.lon === record.lon && r.lat === record.lat
+    && (state.mapSeverity === null || r.sev === state.mapSeverity));
+}
+
 function onClick(info) {
   const { object, layer } = info;
   if ((layer?.id === "collisions" || layer?.id.startsWith("selected-collisions-")) && object) {
-    const sameLocation = F.filter((r) => r.lon === object.lon && r.lat === object.lat);
-    details.open(object, sameLocation);
+    details.open(object, collisionLocationGroup(object));
     return;
   }
   if (layer?.id.startsWith("hexagons-") && object) { selectHex(object.id); return; }
@@ -1054,22 +1068,63 @@ function renderAreaWorkspace(){
   });
 }
 
+function setMapSeverity(severity) {
+  state.mapSeverity = severity;
+  document.querySelectorAll('#analysis [data-severity-filter]').forEach(control => {
+    control.setAttribute('aria-pressed', String(Number(control.dataset.severityFilter) === severity));
+  });
+  if (details.isOpen()) {
+    const record = details.current();
+    if (severity === null || record.sev === severity) details.open(record, collisionLocationGroup(record));
+    else details.close();
+  }
+  version += 1;
+  scheduleFrame();
+}
+
 function renderCharts() {
   const ctx=chartContext(),ids=analysisScopeIds();
   const geo=r=>(!ids||ids.has(r.i))&&(!state.hex||inFocusedGroup(r));
   const metric=state.patternHighlight?POINT_PATTERNS.find(m=>m.label===state.patternHighlight.label):null;
   const condition=r=>!metric||(state.patternHighlight.other?!metric.test(r):metric.test(r));
-  const annual=P.filter(r=>passes(r,['yr','user'])&&geo(r)&&condition(r));
   const scope=state.selB?`${comparisonSelections().length} selected areas`:state.selA?selName(state.selA):state.groupFocus?`${state.groupFocus==='same'?'Same-count':state.groupFocus==='more'?'More-collision':'Fewer-collision'} areas`:'All Calderdale';
-  const showYear=year=>{state.temporal.mode='year';state.temporal.years=new Set([year]);state.groupFocus=null;state.patternGroup=null;update();};
-  renderUserYears($('risk-chart'),{records:annual,years:[...state.filters.yr].sort((a,b)=>a-b).length?[...state.filters.yr].sort((a,b)=>a-b):META.years,activeYears:state.filters.yr,scope:scope+(metric?` · ${patternName()}`:''),users:USERS,activeUsers:state.filters.user,onUser:u=>toggleFilter('user',u),onYear:showYear,areaScopes:state.selB?comparisonSelections().map(sel=>({name:selName(sel),records:P.filter(r=>passes(r,['yr','user'])&&selectionIds(sel).includes(r.i)&&condition(r))})):null});
-  renderConditions($('condition-chart'),{records:F.filter(geo),scope,years:[...state.filters.yr].sort((a,b)=>a-b),active:state.patternHighlight,onPattern:togglePattern});
+  const years = [...state.filters.yr].sort((a, b) => a - b);
+  // Keep the road-user comparisons on the same baseline while the map filters by user.
+  const severityRecords = P.filter(record => passes(record, 'user'));
+  const severityAreas = comparisonSelections().map((selection, index) => {
+    const areaIds = new Set(selectionIds(selection));
+    const name = selName(selection).replace(/^Drawn area \(\d+ collisions\)$/, 'Drawn area');
+    return { label: `Area ${index + 1}`, name, records: severityRecords.filter(r => areaIds.has(r.i) && geo(r) && condition(r)) };
+  });
+  if (!severityAreas.length && (metric || state.groupFocus)) {
+    severityAreas.push({ label: 'Highlighted collisions', name: metric ? patternName() : scope, records: severityRecords.filter(r => geo(r) && condition(r)) });
+  }
+  renderUserSeverity($('risk-chart'), {
+    scopes: [{ label: 'All matching collisions', name: META.name, records: severityRecords }, ...severityAreas],
+    years: years.length ? years : META.years,
+    users: USERS,
+    activeUsers: state.filters.user,
+    onUser: user => toggleFilter('user', user),
+    drilldownYear: state.roadUserYear,
+    getSeverity: () => state.mapSeverity,
+    onSeverity: setMapSeverity,
+    onDrilldown: year => {
+      state.roadUserYear = year;
+      version += 1;
+      renderTemporal();
+      scheduleFrame();
+    },
+    areaContext: state.selA && metric ? patternName() : '',
+  });
+  renderConditions($('condition-chart'), {
+    records: F.filter(geo), active: state.patternHighlight, onPattern: togglePattern,
+    severity: state.mapSeverity, onSeverity: setMapSeverity,
+  });
   renderSpeed($('speed-chart'),ctx);
   renderHeat($('heat-chart'),ctx);
   const profileMetric=metric?.learnedProfile;
   const profileRecords=F.filter(r=>geo(r)&&(profileMetric||condition(r)));
   const areas=state.selB?comparisonSelections().map(sel=>({name:selName(sel),ids:new Set(selectionIds(sel))})):[{name:scope,ids:null}];
-  const years=[...state.filters.yr].sort((a,b)=>a-b);
   const cells=areas.flatMap(a=>(state.temporal.mode==='compare'?years:[null]).map(y=>({label:`${a.name} · ${y??years.join(', ')}`,ids:profileRecords.filter(r=>(!a.ids||a.ids.has(r.i))&&(y===null||r.yr===y)).map(r=>String(r.feature.properties.collision_index))})));
   renderProfiles({cells,active:state.patternHighlight?.label,onReset:()=>{state.patternHighlight=null;update();},onProfile:(label,members)=>{
     let p=POINT_PATTERNS.find(p=>p.label===label);
@@ -1136,6 +1191,8 @@ function renderAll() {
 
 function update() {
   if(state.hex)state.filters.yr=new Set(state.temporal.mode==="compare"?[state.temporal.from,state.temporal.to]:[...state.temporal.years]);
+  if (state.roadUserYear !== null && (!state.filters.user.size || state.filters.yr.size === 1
+    || !areaYearIsSelected(state.roadUserYear))) state.roadUserYear = null;
   state.areaHighlight = activeAreaHighlight();
   version += 1;
   recompute();
@@ -1313,7 +1370,12 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-new ResizeObserver(() => {
+// A local chart expansion can change the page height without resizing the viewport.
+let chartWidth, viewportHeight;
+new ResizeObserver(([entry]) => {
+  if (chartWidth === entry.contentRect.width && viewportHeight === window.innerHeight) return;
+  chartWidth = entry.contentRect.width;
+  viewportHeight = window.innerHeight;
   renderCharts();
   scheduleFrame();
 }).observe(document.body);

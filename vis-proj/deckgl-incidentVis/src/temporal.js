@@ -15,8 +15,8 @@ export function temporalLegend(state, rows, countMax, severityRGB, comparisonMax
   return `<div class="time-legend-heading"><b>${compare?`${t.to} compared with ${t.from}`:`Collisions in ${selectedYearWords(t)}`}</b><span>${t.size} m areas</span></div>
     <div class="time-legend-label">${compare?'Difference in collision counts':'Collision counts in the selected years'}</div>
     ${compare?`<div class="time-legend-keys">${key('Fewer','#306da0')}${key('Same count','#687177')}${key('More','#b45126')}</div><p class="time-legend-scale">${t.from===t.to?'Choose two different years.':'Stronger colour means a bigger difference.'}</p>`:`<div class="time-count-ramp" aria-label="Light means fewer collisions; dark means more"><span></span><span></span><span></span><span></span><span></span></div><div class="time-count-range"><span>0 collisions</span><span>${countMax} collisions</span></div>`}
-    ${state.showPoints||state.selA||state.selB||state.patternHighlight?`<div class="time-legend-points"><div class="time-legend-label">Collision point severity</div><div class="time-legend-keys">${['Fatal','Serious','Slight'].map((name,i)=>key(name,`rgb(${severityRGB[i].join(',')})`,true)).join('')}</div></div>`:''}
-    <div class="time-legend-help">${state.showPoints?'Click a point for full details.':'Click an area to see its collisions.'}</div>`;
+    <div class="time-legend-points"><div class="time-legend-label">Collision point severity</div><div class="time-legend-keys">${['Fatal','Serious','Slight'].map((name,i)=>key(name,`rgb(${severityRGB[i].join(',')})`,true)).join('')}</div></div>
+    <div class="time-legend-help">Select an area or a visible collision point for details.</div>`;
 }
 
 export function temporalControls(meta,state,totals) {
