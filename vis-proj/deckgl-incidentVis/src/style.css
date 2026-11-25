@@ -232,13 +232,42 @@ svg text.muted { fill: var(--muted); }
 }
 .card .k { color: var(--sel); font-size: 10.5px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; }
 .card h3 { margin: 2px 0 8px; font-size: 16px; line-height: 1.25; }
-.card h3 small { display: block; color: var(--cmp); font-size: 12px; font-weight: 500; }
-.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 8px; }
-.stats b { display: block; font-size: 17px; }
-.stats span { color: var(--muted); font-size: 10.5px; }
-.stats .b2 { color: var(--cmp); font-size: 11px; font-weight: 600; }
-.prof-h { display: flex; justify-content: space-between; gap: 8px; margin: 2px 0 4px; color: var(--muted); font-size: 10.5px; }
-.standout { margin: 6px 0 0; font-size: 11.5px; line-height: 1.45; }
+.card h3 small { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; font-weight: 500; }
+.area-empty { margin: 0 0 6px; color: var(--muted); font-size: 12px; }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 8px; }
+.stats b { display: block; font-size: 17px; font-variant-numeric: tabular-nums; }
+.stats span { display: block; color: var(--muted); font-size: 11px; line-height: 1.25; }
+.area-counts { width: 100%; border-collapse: collapse; font-size: 12px; }
+.area-counts caption, .area-counts .area-counts-heading th, .area-history figcaption {
+    padding: 7px 0 4px;
+    border-top: 1px solid var(--border);
+    text-align: left;
+    font-size: 12px;
+    font-weight: 650;
+}
+.area-counts th, .area-counts td { padding: 2px 0; }
+.area-counts th[scope="row"] { padding-right: 8px; text-align: left; font-weight: 400; }
+.area-counts th[scope="col"], .area-counts td { text-align: right; white-space: nowrap; }
+.area-counts td { padding-left: 8px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.area-history { margin: 6px 0 0; }
+.area-history-years { display: grid; grid-template-columns: repeat(var(--year-columns), minmax(32px, 1fr)); gap: 4px; margin: 0; padding: 0; list-style: none; overflow-x: auto; }
+.area-history-group { min-width: 0; text-align: center; font-variant-numeric: tabular-nums; }
+.area-history .is-inactive .area-history-static { opacity: 0.62; }
+.area-history .is-inactive .area-history-year { color: var(--muted); font-weight: 400; }
+.area-history-mark { display: flex; height: 49px; flex-direction: column; justify-content: flex-end; align-items: center; gap: 2px; border-bottom: 1px solid var(--border); font-size: 11px; }
+.area-history-mark i { width: min(22px, 75%); background: var(--muted); border-radius: 3px 3px 0 0; }
+.area-history-year { display: block; margin-top: 3px; color: var(--text); font-size: 11px; font-weight: 650; }
+.area-history button, .area-circumstance button { width: 100%; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; }
+.area-history button, .area-history-static { display: block; padding: 0 1px 2px; border-radius: 4px; }
+.area-history button:enabled:hover, .area-circumstance:has(button:enabled):hover { background: var(--surface); cursor: pointer; }
+.area-history button[aria-pressed="true"], .area-circumstance.is-selected { background: var(--grid); }
+.area-history button[aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--text); }
+.area-history button[aria-pressed="true"] i { background: var(--text); }
+.area-circumstance.is-selected button { color: var(--text); font-weight: 700; }
+.area-circumstance.is-selected th { box-shadow: inset 2px 0 var(--text); }
+.area-circumstance button { padding: 0 4px; text-align: left; }
+.area-circumstance button:disabled, .area-circumstance:not(:has(button:enabled)) { cursor: default; }
+.area-history button:focus-visible, .area-circumstance button:focus-visible { outline: 2px solid var(--text); outline-offset: -2px; }
 .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .btn { padding: 6px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); font-size: 11.5px; }
 .btn.primary { background: var(--text); border-color: var(--text); color: var(--paper); }

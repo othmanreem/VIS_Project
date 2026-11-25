@@ -3,6 +3,11 @@ import './temporal.css';
 
 export const differenceWords = n => n>0?`${n} more collisions`:n<0?`${-n} fewer collisions`:'No change';
 export const selectedYearWords = t => [...t.years].sort().join(', ');
+export function temporalRankBadge(index, direction) {
+  if (direction === 'more') return `↑\u2009${index + 1}`;
+  if (direction === 'fewer') return `↓\u2009${index + 1}`;
+  return String(index + 1);
+}
 export function temporalLegend(state, rows, countMax, severityRGB, comparisonMax) {
   const t=state.temporal;
   const key=(label,colour,point=false)=>`<span><i class="${point?'legend-point':'legend-area'}" style="background:${colour}"></i>${label}</span>`;
@@ -23,9 +28,33 @@ export function temporalControls(meta,state,totals) {
     <p class="time-totals">${t.mode==='compare'?`${t.from}: <b>${totals[meta.years.indexOf(t.from)]||0}</b> collisions · ${t.to}: <b>${totals[meta.years.indexOf(t.to)]||0}</b> collisions`:`<b>${meta.years.reduce((n,y,i)=>n+(t.years.has(y)?totals[i]:0),0)}</b> collisions in ${selectedYearWords(t)} <button class="time-all" data-time-all="1">All years</button>`}</p>
     <details class="time-options"><summary>Area size</summary><select id="time-size" aria-label="Hexagon width">${[250,500,1000].map(s=>`<option value="${s}" ${t.size===s?'selected':''}>${s} metres wide</option>`).join('')}</select><p>Fixed geographical hexagons. Changing the area size helps check whether a pattern persists.</p></details>`;
 }
-export function temporalList(rows,state,nameOf) {
-  const t=state.temporal;
-  return rows.map((b,i)=>`<li class="time-result ${(state.selA?.hexIds||[state.selA?.hexId]).includes(b.id)?'sel':''}" tabindex="0" role="button" data-hex="${b.id}" aria-label="Select ${esc(nameOf(b))}"><span class="rk">${i+1}</span><div><b>${esc(nameOf(b))}</b>
-    <strong class="time-difference ${t.mode==='compare'?(b.delta>0?'more':b.delta<0?'fewer':''):''}">${t.mode==='compare'?differenceWords(b.delta):`${b.after} collisions`}</strong>
-    <span class="time-counts">${t.mode==='compare'?`${t.from}: ${b.baselineBefore??b.before} collisions · ${t.to}: ${b.baselineAfter??b.after} collisions${b.before!==b.baselineBefore||b.after!==b.baselineAfter?`<br>${b.before+b.after} match the active filters`:''}`:`Selected years: ${selectedYearWords(t)}`}</span></div></li>`).join('')||'<li class="empty">No locations match these filters.</li>';
+export function temporalList(groups, state, nameOf) {
+  const { from, to } = state.temporal;
+  const selectedIds = state.selA?.hexIds || [state.selA?.hexId];
+  const maximum = Math.max(1, ...groups.flatMap(({ rows, direction }) => rows.map(area => direction ? Math.abs(area.delta) : area.after)));
+  return groups.map(({ rows, direction, label }) => {
+    const items = rows.map((area, index) => {
+      const name = esc(nameOf(area));
+      const count = `${area.after} ${area.after === 1 ? 'collision' : 'collisions'}`;
+      const magnitude = direction ? Math.abs(area.delta) : area.after;
+      const value = direction === 'more' ? `+${magnitude}` : direction === 'fewer' ? `−${magnitude}` : magnitude;
+      const before = area.baselineBefore ?? area.before;
+      const after = area.baselineAfter ?? area.after;
+      const description = direction ? `${before} in ${from}, ${after} in ${to}, ${differenceWords(area.delta)}` : count;
+      const countsByYear = direction
+        ? `<span class="time-counts"><span><strong>${before}</strong> in ${from}</span> <span><span aria-hidden="true">→</span> <strong>${after}</strong> in ${to}</span>${area.before !== before || area.after !== after ? `<small>${area.before + area.after} match the active filters</small>` : ''}</span>`
+        : '';
+      return `<li class="time-result${selectedIds.includes(area.id) ? ' sel' : ''}" tabindex="0" role="button" data-hex="${area.id}" aria-label="Select ${name}, ${description}">
+        <span class="rk" aria-hidden="true">${temporalRankBadge(index, direction)}</span>
+        <div class="time-rank-place"><b>${name}</b>${countsByYear}</div>
+        <strong class="time-difference">${value}</strong>
+        <span class="time-rank-track" aria-hidden="true"><i style="width:${magnitude / maximum * 100}%"></i></span>
+      </li>`;
+    }).join('');
+    if (!direction) return items || '<li class="empty">No locations match these filters.</li>';
+    return `<li class="time-rank-group ${direction}">
+      <h3 id="time-rank-${direction}">${label}</h3>
+      <ol aria-labelledby="time-rank-${direction}">${items || '<li class="empty hint">No areas</li>'}</ol>
+    </li>`;
+  }).join('');
 }

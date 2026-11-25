@@ -13,14 +13,13 @@ import { classifyAreaGroups, profileAreaGroups, PATTERN_METRICS, RQ3_METRICS } f
 import { renderSavedComparisons, renderComparison } from "./areaWorkspace.js";
 import { renderGroupAnalysis, renderSelectedYearsAnalysis } from "./groupAnalysis.js";
 import { buildConcentrations, compareConcentrations } from "./concentrations.js";
-import { temporalControls, temporalList, differenceWords, selectedYearWords, temporalLegend } from "./temporal.js";
+import { temporalControls, temporalList, temporalRankBadge, differenceWords, selectedYearWords, temporalLegend } from "./temporal.js";
 
 // ==================================================
 // Collision area explorer
 // 1. Sidebar lists fixed hexagon areas for the selected years.
-// 2. Selecting a hotspot, or drawing a lasso / box, opens a card
-//    that profiles the area against all matching collisions
-//    (or against a second, compared area).
+// 2. Selecting or drawing an area opens a card with collision counts.
+//    Selecting a second area shows its counts alongside the first.
 // 3. The analysis charts show risk and timing for everything,
 //    with the selected area marked; clicking them filters all views.
 // 4. Clicking a point opens the full collision details.
@@ -42,6 +41,7 @@ const state = {
   filters: { user: new Set(), light: new Set(), wx: new Set(), spd: new Set(), cell: new Set(), yr: new Set() },
   selA: null, // { type: "hotspot", id } or { type: "area", tool, poly, ids, label }
   selB: null, // second area for comparison
+  areaHighlight: null,
   pickB: false, // waiting for the user to pick the second area
   mode: "select", // select | lasso | box
   hex: true,
@@ -136,9 +136,12 @@ function computeTemporalStats() {
   const ranked=state.groupFocus&&t.mode==="compare"?temporalData.filter(b=>b.group===state.groupFocus):temporalData;
   const more=ranked.filter(b=>b.delta>0).sort((a,b)=>b.delta-a.delta||b.after-a.after);
   const fewer=ranked.filter(b=>b.delta<0).sort((a,b)=>a.delta-b.delta||b.before-a.before);
-  temporalRank=t.mode==="year"?[...temporalData].sort((a,b)=>b.after-a.after).slice(0,6)
-    :[...more.slice(0,3),...fewer.slice(0,3)];
-  if(!temporalRank.length)temporalRank=[...ranked].sort((a,b)=>b.after-a.after).slice(0,6);
+  temporalRank = t.mode === "year"
+    ? [{ rows: [...temporalData].sort((a, b) => b.after - a.after).slice(0, 6) }]
+    : [
+      { direction: "more", label: "More collisions", rows: more.slice(0, 4) },
+      { direction: "fewer", label: "Fewer collisions", rows: fewer.slice(0, 4) },
+    ];
 }
 function hexName(bin,urgent=false) {
   const place=placeName(bin.centre,urgent);
@@ -149,7 +152,17 @@ function selectionIds(sel) {
 }
 function comparisonSelections(){return [state.selA,state.selB,...state.extraAreas].filter(Boolean);}
 function editingArea(target){return target==='A'?state.selA:target==='B'?state.selB:state.extraAreas[Number(target.slice(1))];}
-function assignArea(target,sel){if(target==='A')state.selA=sel;else if(target==='B')state.selB=sel;else state.extraAreas[Number(target.slice(1))]=sel;}
+function assignArea(target, sel) {
+  if (target === "A") {
+    const highlight = activeAreaHighlight();
+    state.selA = sel;
+    state.areaHighlight = sel && highlight ? { ...highlight, selection: sel } : null;
+  } else if (target === "B") {
+    state.selB = sel;
+  } else {
+    state.extraAreas[Number(target.slice(1))] = sel;
+  }
+}
 function analysisScopeIds(){return state.selA?new Set((state.selB?comparisonSelections():[state.selA]).flatMap(selectionIds)):null;}
 function selectHex(id) {
   const bin=geographicalHexagons.find(b=>b.id===id);if(!bin)return;
@@ -241,12 +254,11 @@ function clearSelection() {
 // --------------------------------------------------
 const PROFILE = [
   ["Pedestrian involved", (r) => r.user === 1],
-  ["Cyclist / motorcyclist", (r) => r.user >= 2],
-  ["Killed or serious", (r) => r.sev <= 2],
+  ["Cyclist, motorcyclist or other/unknown", (r) => r.user >= 2],
   ["In darkness", (r) => r.light === 1 || r.light === 2],
-  ["Wet / icy surface", (r) => r.wet === 1],
+  ["Wet, snowy or icy road", (r) => r.wet === 1],
   ["At a junction", (r) => r.junc === 1],
-  ["Weekend", (r) => r.dow >= 5],
+  ["On a weekend", (r) => r.dow >= 5],
 ];
 const share = (records, fn) => (records.length ? (100 * records.filter(fn).length) / records.length : 0);
 
@@ -415,6 +427,8 @@ function buildLayers() {
   const inkRgb = hexToRgb(css("--text"));
   const selectionKey = version;
   const activePatternIds=state.patternHighlight?new Set((patternRecords()||[]).map(r=>r.i)):null;
+  const areaMatches = areaHighlightRecords();
+  const areaMatchIds = areaMatches && new Set(areaMatches.map(record => record.i));
 
   if (state.hex) {
     layers.push(new PolygonLayer({
@@ -485,19 +499,20 @@ function buildLayers() {
   if (!state.hex || state.showPoints || anySelection || state.patternHighlight) {
     const radius = pointRadius();
     const metric=POINT_PATTERNS.find(m=>m.label===state.patternHighlight?.label);
-    const highlighted=r=>!metric || ((!scopeIds||scopeIds.has(r.i)) && inFocusedGroup(r) && (state.patternHighlight.other ? !metric.test(r) : metric.test(r)));
+    const highlighted = r => areaMatchIds ? areaMatchIds.has(r.i) : !metric || ((!scopeIds||scopeIds.has(r.i)) && inFocusedGroup(r) && (state.patternHighlight.other ? !metric.test(r) : metric.test(r)));
+    const points = drawOrder.filter(r=>(!state.hex||inFocusedGroup(r))&&(!state.hex||state.showPoints||A?.has(r.i)||B?.has(r.i)||extraIds.has(r.i)||(metric&&highlighted(r))));
     layers.push(new ScatterplotLayer({
       id: state.hex ? `selected-collisions-${version}` : "collisions",
       // Slight first, so serious and fatal collisions are drawn on top.
       // Details on demand: reveal the actual collision locations in selected
       // hexagons or drawn areas without replacing the geographical overview.
-      data: drawOrder.filter(r=>(!state.hex||inFocusedGroup(r))&&(!state.hex||state.showPoints||A?.has(r.i)||B?.has(r.i)||extraIds.has(r.i)||(metric&&highlighted(r)))).sort((a,b)=>Number(highlighted(a))-Number(highlighted(b))||b.sev-a.sev),
+      data: points.sort((a,b)=>Number(highlighted(a))-Number(highlighted(b))||b.sev-a.sev),
       getPosition: (r) => r.position,
-      getRadius: (r) => ((A && A.has(r.i)) || (B && B.has(r.i)) ? radius + 0.6 : radius) + (metric&&highlighted(r)?2:0),
+      getRadius: (r) => ((A && A.has(r.i)) || (B && B.has(r.i)) ? radius + 0.6 : radius) + ((metric || areaMatchIds) && highlighted(r) ? 2 : 0),
       radiusUnits: "pixels",
-      getFillColor: (r) => pointColor(r).concat(!highlighted(r)?24:242),
+      getFillColor: (r) => pointColor(r).concat(highlighted(r) ? 242 : areaMatchIds ? 150 : 24),
       stroked: true,
-      getLineColor: r=>[255,254,250,highlighted(r)?230:20],
+      getLineColor: r=>[255,254,250,highlighted(r) ? 230 : areaMatchIds ? 150 : 20],
       getLineWidth: () => 0.8,
       lineWidthUnits: "pixels",
       pickable: true,
@@ -635,13 +650,19 @@ function drawOverlay() {
   });
 
   const overlayPatternIds=state.patternHighlight?new Set((patternRecords()||[]).map(r=>r.i)):null;
-  if(state.hex)temporalRank.forEach((b,i)=>{
+  if(state.hex)temporalRank.forEach(({ rows, direction })=>rows.forEach((b,i)=>{
     const opacity=overlayPatternIds && !b.members.some(i=>overlayPatternIds.has(i)) ? 0.15 : 1;
     const [x,y]=vp.project(b.centre);
     if(x<0||y<0||x>width||y>height)return;
-    svgEl("circle",{opacity,cx:x,cy:y,r:9,fill:css("--paper"),stroke:css("--text"),"stroke-width":1},overlay);
-    svgEl("text",{opacity,x,y:y+3.5,"text-anchor":"middle","font-size":10,"font-weight":700},overlay,i+1);
-  });
+    const color = css(direction ? `--time-${direction}` : "--text");
+    const badgeBackground = { opacity, fill: css("--paper"), stroke: color, "stroke-width": 1 };
+    if (direction) {
+      svgEl("rect", { ...badgeBackground, x: x - 14.5, y: y - 11, width: 29, height: 22, rx: 11 }, overlay);
+    } else {
+      svgEl("circle", { ...badgeBackground, cx: x, cy: y, r: 9 }, overlay);
+    }
+    svgEl("text",{opacity,x,y:y+3.5,fill:color,"text-anchor":"middle","font-size":10,"font-weight":700},overlay,temporalRankBadge(i,direction));
+  }));
 
   // Lasso / box being drawn
   if (drawing && drawing.points.length > 1) {
@@ -792,10 +813,10 @@ function renderTemporal() {
 
 function renderRank() {
   $("rank").classList.toggle("time-list",state.hex);
-  document.querySelector(".side-body .sec-h h2").textContent=state.hex?(state.temporal.mode==="compare"?"Where collisions increased or decreased":"Where most collisions occurred"):"Where to look first";
+  document.querySelector(".side-body .sec-h h2").textContent=state.hex?(state.temporal.mode==="compare"?"Collision changes":"Top collision areas"):"Where to look first";
+  $("hs-hint").hidden = state.hex;
   if(state.hex){
     $("hs-count").textContent=`${temporalData.length} areas`;
-    $("hs-hint").textContent=state.temporal.mode==="compare"?`${temporalData.filter(b=>b.delta>0).length} areas recorded more collisions; ${temporalData.filter(b=>b.delta<0).length} recorded fewer. Largest differences are listed below. Numbers match the map.`:`Areas with the most recorded collisions in ${selectedYearWords(state.temporal)}. Numbers match the map.`;
     $("rank").innerHTML=temporalList(temporalRank,state,hexName);
     return;
   }
@@ -826,6 +847,55 @@ function renderRank() {
 // --------------------------------------------------
 // Selected-area card
 // --------------------------------------------------
+function activeAreaHighlight() {
+  const highlight = state.areaHighlight;
+  if (!state.selA || highlight?.selection !== state.selA || state.patternHighlight) return null;
+  if (highlight.kind === "year" && !areaYearIsSelected(highlight.value)) return null;
+  return highlight;
+}
+
+function areaYearIsSelected(year) {
+  return !state.filters.yr.size || state.filters.yr.has(year);
+}
+
+function areaYearRecords(areas) {
+  const ids = new Set(areas.flatMap(selectionIds));
+  return [...ids].map(id => P[id]).filter(record => passes(record, "yr") && inFocusedGroup(record));
+}
+
+function areaHighlightRecords() {
+  const highlight = activeAreaHighlight();
+  if (!highlight) return null;
+  if (highlight.kind === "year") {
+    return areaYearRecords(comparisonSelections()).filter(record => record.yr === highlight.value);
+  }
+  const tests = [...highlight.values].map(index => PROFILE[index][1]);
+  return [...new Set([...selPoints(state.selA), ...selPoints(state.selB)])].filter(record => tests.some(matches => matches(record)));
+}
+
+function renderAreaHistory(areas, highlight) {
+  const counts = new Map(META.years.map(year => [year, 0]));
+  for (const record of areaYearRecords(areas)) counts.set(record.yr, counts.get(record.yr) + 1);
+  const max = Math.max(1, ...counts.values());
+  return `<figure class="area-history">
+    <figcaption>${areas.length > 1 ? "Total collisions by year" : "Collisions by year"}</figcaption>
+    <ul class="area-history-years" style="--year-columns:${META.years.length}">
+      ${[...counts].map(([year, count]) => {
+        const enabled = areaYearIsSelected(year);
+        const pressed = highlight?.kind === "year" && highlight.value === year;
+        const label = `${year}, ${fmt(count)} ${count === 1 ? "collision" : "collisions"}`;
+        const mark = `<span class="area-history-mark"><b>${fmt(count)}</b><i aria-hidden="true" style="height:${(count / max) * 32}px"></i></span>`;
+        return `<li class="area-history-group${enabled ? "" : " is-inactive"}">
+          ${enabled
+            ? `<button type="button" data-area-highlight="year" data-value="${year}" aria-pressed="${pressed}" aria-label="${label}">${mark}</button>`
+            : `<span class="area-history-static" role="img" aria-label="${label}">${mark}</span>`}
+          <span class="area-history-year">${year}</span>
+        </li>`;
+      }).join("")}
+    </ul>
+  </figure>`;
+}
+
 function renderCard() {
   const card = $("card");
   const pattern=patternRecords();
@@ -839,59 +909,41 @@ function renderCard() {
   card.className = "card";
   const A = pattern || selPoints(state.selA);
   const B = !pattern && state.selB ? selPoints(state.selB) : null;
-  const reference = B || (pattern ? F.filter(inFocusedGroup).filter(r=>!analysisScopeIds()||analysisScopeIds().has(r.i)) : F);
-  const referenceLabel = B ? selName(state.selB) : pattern&&state.selA ? selName(state.selA) : "all matching collisions";
-  const summary = (records) => ({
-    n: records.length,
-    cas: records.reduce((sum, r) => sum + r.cas, 0),
-    k: Math.round(ksiShare(records)),
-    f: records.filter((r) => r.sev === 1).length,
-  });
-  const a = summary(A);
-  const b = B ? summary(B) : null;
-
-  // Profile: share in the area vs the reference, as bars around a dashed line.
-  const rows = PROFILE.map(([label, fn]) => ({ label, v: share(A, fn), r: share(reference, fn) }));
-  const mid = 200;
-  const scale = 2.4;
-  const rowH = 23;
-  let profile = `<svg width="100%" viewBox="0 0 330 ${rows.length * rowH + 6}" role="img" aria-label="Profile compared with ${escapeHtml(referenceLabel)}">
-    <line x1="${mid}" x2="${mid}" y1="0" y2="${rows.length * rowH}" stroke="var(--muted)" stroke-dasharray="2 2"/>`;
-  rows.forEach((row, i) => {
-    const d = row.v - row.r;
-    const y = i * rowH;
-    const w = Math.max(1.5, Math.min(d >= 0 ? 90 : 34, Math.abs(d) * scale));
-    const x = d >= 0 ? mid : mid - w;
-    const fill = d >= 8 ? "var(--risk)" : d <= -8 ? "var(--sel)" : "var(--neutral-bar)";
-    profile += `<text x="0" y="${y + 12}" font-size="11.5">${row.label}</text>
-      <rect x="${x}" y="${y + 3}" width="${w}" height="11" rx="2" fill="${fill}"/>
-      <text x="${d >= 0 ? mid + w + 4 : mid - w - 4}" y="${y + 12.5}" font-size="10.5" font-weight="650" text-anchor="${d >= 0 ? "start" : "end"}">${Math.round(row.v)}%</text>`;
-  });
-  profile += "</svg>";
-
-  const top = [...rows].sort((x, y) => Math.abs(y.v - y.r) - Math.abs(x.v - x.r))[0];
-  const ratio = top.r ? top.v / top.r : 0;
-  const standout = A.length < 5
-    ? "Too few collisions in this area for a reliable profile."
-    : Math.abs(top.v - top.r) < 5
-      ? `This area looks like ${B ? escapeHtml(referenceLabel) : "the rest of ${escapeHtml(META.name)}"}; nothing stands out by more than 5 points.`
-      : `<b>Stands out:</b> ${top.label.toLowerCase()} in ${Math.round(top.v)}% of collisions vs ${Math.round(top.r)}% ${B ? `in ${escapeHtml(referenceLabel)}` : "overall"}${ratio >= 1.6 ? ` (${ratio.toFixed(1)}×)` : ""}.`;
-
-  const stat = (value, label, other) => `<div><b>${value}</b><span>${label}</span>${b ? `<div class="b2">${other}</div>` : ""}</div>`;
-  card.innerHTML = `<div class="k">${pattern?"Selected circumstance":state.selA.type === "hotspot" ? "Selected hotspot" : `Selected area · ${state.selA.tool}`}</div>
-    <h3>${escapeHtml(pattern?patternName():selName(state.selA))}${B ? `<small>compared with ${escapeHtml(referenceLabel)}</small>` : ""}</h3>
-    ${!pattern&&state.selA?.hexId?(()=>{const b=temporalData.find(b=>b.id===state.selA.hexId);return b?`<p class="time-summary"><b>${state.temporal.mode==="compare"?differenceWords(b.delta):`${b.after} collisions in ${selectedYearWords(state.temporal)}`}</b>Matching collisions by year: ${META.years.map((y,i)=>`${y}: ${b.counts[i]}`).join(" · ")}</p>`:"";})():""}
-    ${!A.length?'<p class="time-summary">No collisions in this area match the selected years and filters. Clear a filter to see more records.</p>':""}
-    <div class="stats">
-      ${stat(a.n, "collisions", b?.n)}${stat(a.cas, "casualties", b?.cas)}${stat(`${a.k}%`, "KSI", `${b?.k}%`)}${stat(a.f, "fatal", b?.f)}
+  const highlight = activeAreaHighlight();
+  const summary = [
+    ["Total incidents", records => records.length],
+    ["Casualties", records => records.reduce((sum, record) => sum + record.cas, 0)],
+    ["Serious or fatal collisions", records => records.filter(record => record.sev <= 2).length],
+    ["Vehicles involved", records => records.reduce((sum, record) => sum + record.veh, 0)],
+  ];
+  const countRows = measures => measures.map(([label, count]) => `<tr>
+    <th scope="row">${label}</th><td>${fmt(count(A))}</td>${B ? `<td>${fmt(count(B))}</td>` : ""}
+  </tr>`).join("");
+  const circumstances = A.length || B?.length ? PROFILE.map(([label, matches], index) => {
+    const a = A.filter(matches).length;
+    const b = B?.filter(matches).length ?? 0;
+    const pressed = highlight?.kind === "circumstance" && highlight.values.has(index);
+    const heading = pattern ? label : `<button type="button" data-area-highlight="circumstance" data-value="${index}"
+      aria-pressed="${pressed}" ${!a && !b && !pressed ? "disabled" : ""}>${label}</button>`;
+    return `<tr class="area-circumstance${pressed ? " is-selected" : ""}">
+      <th scope="row">${heading}</th><td>${fmt(a)}</td>${B ? `<td>${fmt(b)}</td>` : ""}
+    </tr>`;
+  }).join("") : "";
+  card.innerHTML = `<h3>${escapeHtml(pattern ? patternName() : selName(state.selA))}
+      ${B ? `<small>Compared with ${escapeHtml(selName(state.selB))}</small>` : ""}</h3>
+    ${B ? `<table class="area-counts">
+      <thead><tr><td></td><th scope="col">Area 1</th><th scope="col">Area 2</th></tr></thead>
+      <tbody>${countRows(summary)}</tbody>
+      ${circumstances ? `<tbody><tr class="area-counts-heading"><th colspan="3" scope="rowgroup">Collision circumstances</th></tr>${circumstances}</tbody>` : ""}
+    </table>` : `<div class="stats">
+      ${summary.map(([label, count]) => `<div><b>${fmt(count(A))}</b><span>${label}</span></div>`).join("")}
     </div>
-    <div class="prof-h"><span>Compared with ${escapeHtml(referenceLabel)}</span><span>dashed line = ${B ? "compared area" : "average"}</span></div>
-    ${profile}
-    <p class="standout">${standout}</p>
-    ${state.hex?`<p class="hint">Click a collision point for full details.</p>`:""}
+    ${circumstances ? `<table class="area-counts"><caption>Collision circumstances</caption><tbody>${circumstances}</tbody></table>` : ""}`}
+    ${!A.length && !B ? `<p class="area-empty">No collisions match this selection.</p>` : ""}
+    ${!pattern && (B || state.selA?.type === "area") ? renderAreaHistory(comparisonSelections(), highlight) : ""}
     ${!pattern&&state.hex?`<div class="group-hex-controls"><label><input id="multi-hex" type="checkbox" ${state.multiHex?"checked":""}> Select multiple hexagons</label>${state.multiHex?`<label>Add to <select id="hex-target"><option value="A">Area 1</option><option value="B" ${state.editArea==="B"?"selected":""}>Area 2</option>${state.extraAreas.map((a,i)=>`<option value="C${i}" ${state.editArea===`C${i}`?"selected":""}>Area ${i+3}</option>`).join("")}</select></label>`:""}</div>`:""}
     <div class="btns">
-      <button type="button" class="btn primary" data-card="table">Show these ${a.n} in a table</button>
+      <button type="button" class="btn primary" data-card="table">View records</button>
       ${!pattern?`<button type="button" class="btn" data-card="compare">${state.selB ? "Change comparison" : state.pickB ? "Picking… (Esc to cancel)" : "Compare with…"}</button>`:""}
       ${!pattern&&state.selB?`<button type="button" class="btn" data-card="add-area">${state.pickExtra?'Pick another area…':'Add another area'}</button><button type="button" class="btn" data-card="save-comparison">Save comparison</button>`:''}
       <button type="button" class="btn" data-card="zoom">Zoom to area</button>
@@ -1084,11 +1136,9 @@ function renderAll() {
 
 function update() {
   if(state.hex)state.filters.yr=new Set(state.temporal.mode==="compare"?[state.temporal.from,state.temporal.to]:[...state.temporal.years]);
+  state.areaHighlight = activeAreaHighlight();
   version += 1;
   recompute();
-  // No selected outline, points or table from an excluded year/filter may leak
-  // into the next analytical view. Fixed grid geometry stays shared; data does not.
-  // A shown collision that no longer matches the filters is closed.
   if (details.isOpen() && !inF.has(details.current().i)) details.close();
   renderAll();
 }
@@ -1162,6 +1212,33 @@ $("card").addEventListener("change", event=>{
   if(event.target.id==='hex-target'){state.editArea=event.target.value;update();}
 });
 $("card").addEventListener("click", (event) => {
+  const control = event.target.closest("[data-area-highlight]") || event.target.closest(".area-circumstance")?.querySelector("[data-area-highlight]");
+  if (control && !control.disabled) {
+    const kind = control.dataset.areaHighlight;
+    const value = Number(control.dataset.value);
+    const current = activeAreaHighlight();
+    if (kind === "year") {
+      state.areaHighlight = current?.kind === "year" && current.value === value
+        ? null : { kind, value, selection: state.selA };
+    } else {
+      const values = current?.kind === "circumstance" ? new Set(current.values) : new Set();
+      if (!values.delete(value)) values.add(value);
+      state.areaHighlight = values.size ? { kind, values, selection: state.selA } : null;
+    }
+    const card = $("card");
+    const scroll = card.scrollTop;
+    const yearScroll = card.querySelector(".area-history-years")?.scrollLeft;
+    const focused = document.activeElement === control;
+    version += 1;
+    renderCard();
+    card.scrollTop = scroll;
+    if (yearScroll) card.querySelector(".area-history-years").scrollLeft = yearScroll;
+    if (focused) {
+      card.querySelector(`[data-area-highlight="${kind}"][data-value="${value}"]`)?.focus({ preventScroll: true });
+    }
+    scheduleFrame();
+    return;
+  }
   const action = event.target.closest("[data-card]")?.dataset.card;
   if (action === "table") {
     state.drawer = true;
