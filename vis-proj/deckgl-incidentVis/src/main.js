@@ -6,9 +6,9 @@ import { META, USERS, LIGHT, WEATHER, DAYS, SEVERITY_NAMES, loadAllData } from "
 import { inPolygon } from "./hotspots.js";
 import { createPlaceNamer } from "./placeNames.js";
 import { createDetailsPanel, escapeHtml } from "./details.js";
-import { renderSpeed, renderHeat, ksiShare, fmt } from "./charts.js";
+import { renderHeat, ksiShare, fmt } from "./charts.js";
 import "./style.css";
-import {renderUserSeverity,renderConditions} from "./municipalCharts.js";
+import {renderUserSeverity,renderConditions,renderSpeedGrid} from "./municipalCharts.js";
 import { classifyAreaGroups, profileAreaGroups, PATTERN_METRICS, RQ3_METRICS } from "./areaGroups.js";
 import { renderSavedComparisons, renderComparison } from "./areaWorkspace.js";
 import { renderGroupAnalysis, renderSelectedYearsAnalysis } from "./groupAnalysis.js";
@@ -1015,6 +1015,7 @@ function chartContext() {
     areaRecords: skip => (patternRecords()||selPoints(state.selA)).filter(r => analysisPasses(r, skip)),
     comparedRecords: skip => selPoints(state.selB).filter(r => analysisPasses(r, skip)),
     toggle:toggleFilter,color:css,
+    selected:state.selectedRecord, // clicked map point: marked in the speed and time charts
     pattern:state.patternHighlight,selectPattern:togglePattern,
     selectTimeCells: (keys,add) => {state.filters.cell=add?new Set([...state.filters.cell,...keys]):new Set(keys);update();},
   };
@@ -1104,17 +1105,20 @@ function renderCharts() {
   const scope=state.selB?`${comparisonSelections().length} selected areas`:state.selA?selName(state.selA):state.groupFocus?`${state.groupFocus==='same'?'Same-count':state.groupFocus==='more'?'More-collision':'Fewer-collision'} areas`:'All Calderdale';
   const years = [...state.filters.yr].sort((a, b) => a - b);
   // Keep the road-user comparisons on the same baseline while the map filters by user.
-  const severityRecords = P.filter(record => passes(record, 'user'));
-  const severityAreas = comparisonSelections().map((selection, index) => {
-    const areaIds = new Set(selectionIds(selection));
-    const name = selName(selection).replace(/^Drawn area \(\d+ collisions\)$/, 'Drawn area');
-    return { label: `Area ${index + 1}`, name, records: severityRecords.filter(r => areaIds.has(r.i) && geo(r) && condition(r)) };
-  });
-  if (!severityAreas.length && (metric || state.groupFocus)) {
-    severityAreas.push({ label: 'Highlighted collisions', name: metric ? patternName() : scope, records: severityRecords.filter(r => geo(r) && condition(r)) });
-  }
+  // Columns shared by the road-user and speed-limit grids: all collisions, then each selected area.
+  const gridScopes = base => {
+    const areas = comparisonSelections().map((selection, index) => {
+      const areaIds = new Set(selectionIds(selection));
+      const name = selName(selection).replace(/^Drawn area \(\d+ collisions\)$/, 'Drawn area');
+      return { label: `Area ${index + 1}`, name, records: base.filter(r => areaIds.has(r.i) && geo(r) && condition(r)) };
+    });
+    if (!areas.length && (metric || state.groupFocus)) {
+      areas.push({ label: 'Highlighted collisions', name: metric ? patternName() : scope, records: base.filter(r => geo(r) && condition(r)) });
+    }
+    return [{ label: 'All collisions', name: META.name, records: base }, ...areas];
+  };
   renderUserSeverity($('risk-chart'), {
-    scopes: [{ label: 'All collisions', name: META.name, records: severityRecords }, ...severityAreas],
+    scopes: gridScopes(P.filter(record => passes(record, 'user'))),
     years: years.length ? years : META.years,
     users: USERS,
     activeUsers: state.filters.user,
@@ -1144,7 +1148,12 @@ function renderCharts() {
     severity: state.mapSeverity, onSeverity: setMapSeverity,
     selected: state.selectedRecord, onClearSelected: () => details.close(),
   });
-  renderSpeed($('speed-chart'),ctx);
+  renderSpeedGrid($('speed-chart'), {
+    scopes: gridScopes(P.filter(record => passes(record, 'spd'))),
+    speeds: META.speeds, activeSpeeds: state.filters.spd, onSpeed: value => toggleFilter('spd', value),
+    severity: state.mapSeverity, onSeverity: setMapSeverity,
+    selected: state.selectedRecord, onClearSelected: () => details.close(),
+  });
   renderHeat($('heat-chart'),ctx);
   const profileMetric=metric?.learnedProfile;
   const profileRecords=F.filter(r=>geo(r)&&(profileMetric||condition(r)));

@@ -29,6 +29,12 @@ export const fmt = (n) => n.toLocaleString("en-GB");
 export const ksiShare = (records) =>
   (records.length ? (100 * records.filter((r) => r.sev <= 2).length) / records.length : 0);
 
+// Ring marker for the selected collision (the point clicked on the map), matching the
+// pins used in the road-user and conditions charts.
+function selectedRing(parent, ctx, cx, cy, r = 4.5) {
+  return el("circle", { cx, cy, r, fill: ctx.color("--paper"), stroke: ctx.color("--text"), "stroke-width": 2, "pointer-events": "none", "data-selected-marker": "" }, parent);
+}
+
 function prepare(svg) {
   const rect = svg.getBoundingClientRect();
   svg.setAttribute("viewBox", `0 0 ${rect.width} ${rect.height}`);
@@ -66,7 +72,8 @@ function chartKey(svg, ctx) {
   const hint = svg.previousElementSibling;
   hint.textContent = 'Serious or fatal collisions (%). Grey bar: overall.'
     + (ctx.hasSelection ? ` Blue line: selected ${ctx.selectionLabel==='Circumstance'?'circumstance':'area'}.` : ' Select an area to compare.')
-    + (ctx.selB ? ' Orange line: compared area.' : '');
+    + (ctx.selB ? ' Orange line: compared area.' : '')
+    + (ctx.selected ? ' Ring = selected collision.' : '');
 }
 function tooltip(g, base, selected) {
   el('title', {}, g, `Overall: ${shareText(base)} (${countText(base)} collisions serious or fatal).`
@@ -105,33 +112,6 @@ export function renderRisk(svg, ctx, field) {
     clickable(g,`${row.name}: overall ${shareText(row.records)}. ${subs.map(a=>`${a.label} ${shareText(a.records)}, ${countText(a.records)}`).join('. ')}. ${conditions?'Click to highlight matching collisions; click again to clear.':'Click to filter.'}`,()=>conditions?ctx.selectPattern(row.metric.label):ctx.toggle(field,row.value));
   });
   el('text',{x:0,y:h-2,'font-size':9.5,class:'muted'},svg,conditions?`${omitted?`${omitted} other/unknown excluded · `:''}* Fewer than 5 records`:selected.length?'* Fewer than 5 collisions; read with care.':'Click a category to filter; others stay visible.');
-}
-
-export function renderSpeed(svg, ctx) {
-  const [w,h]=prepare(svg);chartKey(svg,ctx);
-  const base=ctx.records.filter(r=>ctx.passes(r,'spd')), selected=areas(ctx,'spd');
-  const ml=78,mr=34,X=v=>ml+v/100*(w-ml-mr);
-  const rh=(h-20)/META.speeds.length;
-  META.speeds.forEach((speed,v)=>{
-    const records=base.filter(r=>r.spd===v),y=5+v*rh;
-    const active=ctx.filters.spd.has(v),g=el('g',{'data-category':v,'data-count':records.length},svg);
-    el('rect',{x:0,y:y-4,width:w,height:rh-1,fill:'transparent'},g);
-    el('text',{x:0,y:y+10,'font-size':12,'font-weight':active?700:400},g,`${speed} mph`);
-    el('text',{x:0,y:y+24,'font-size':10,class:'muted'},g,`${records.length} overall`);
-    el('line',{x1:ml,x2:X(100),y1:y+7,y2:y+7,stroke:ctx.color('--grid')},g);
-    if(records.length) el('rect',{x:ml,y,width:X(ksiShare(records))-ml,height:14,rx:2,fill:ctx.color('--neutral-bar'),'fill-opacity':!ctx.filters.spd.size||active?1:.35},g);
-    el('text',{x:X(100)+5,y:y+11,'font-size':11},g,shareText(records));
-    const subs=selected.map(a=>({...a,records:a.records.filter(r=>r.spd===v)}));
-    subs.forEach((a,j)=>{
-      if(a.records.length) el('line',{x1:X(ksiShare(a.records)),x2:X(ksiShare(a.records)),y1:j?y+14:y-3,y2:j?y+25:y+14,stroke:a.color,'stroke-width':3,'data-area-marker':a.label},g);
-      const text=el('text',{x:ml,y:y+29+j*13,'font-size':10.5,'font-weight':600},g,
-        a.records.length ? `${a.label}: ${shareText(a.records)} (${countText(a.records)})${a.records.length<5?'*':''}` : `${a.label}: no collisions`);
-      text.style.fill=a.color;
-    });
-    tooltip(g,records,subs);
-    clickable(g,`${speed} mph: overall ${shareText(records)} (${countText(records)}). ${subs.map(a=>`${a.label}: ${shareText(a.records)} (${countText(a.records)})`).join('. ')} Click to filter.`,()=>ctx.toggle('spd',v));
-  });
-  el('text',{x:0,y:h-2,'font-size':9.5,class:'muted'},svg,selected.length?'* Fewer than 5 collisions; read with care.':'Click a speed limit to filter; others stay visible.');
 }
 
 // "When collisions happen": hour × weekday counts; dots = selected area.
@@ -178,6 +158,14 @@ export function renderHeat(svg, ctx) {
       }
     }
   });
+  const sel = ctx.selected;
+  if (sel && sel.hr >= 0 && sel.dow >= 0) {
+    const x = ml + sel.hr * cw, y = sel.dow * ch;
+    // White halo + dark outline so it reads on light and dark cells alike.
+    el("rect", { x: x - 0.5, y: y - 0.5, width: cw + 1, height: ch + 1, rx: 3, fill: "none", stroke: ctx.color("--paper"), "stroke-width": 4.5, "pointer-events": "none" }, svg);
+    el("rect", { x: x - 0.5, y: y - 0.5, width: cw + 1, height: ch + 1, rx: 3, fill: "none", stroke: ctx.color("--text"), "stroke-width": 2.2, "pointer-events": "none", "data-selected-marker": "" }, svg);
+    selectedRing(svg, ctx, x + cw / 2, y + ch / 2, Math.max(2.5, Math.min(cw, ch) / 2 - 3));
+  }
   [0, 6, 12, 18].forEach((hour) => {
     el("text", { x: ml + hour * cw, y: h - 4, "font-size": 10, class: "muted" }, svg, `${String(hour).padStart(2, "0")}:00`);
   });

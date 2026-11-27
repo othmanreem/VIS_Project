@@ -428,7 +428,7 @@ tbody tr:hover { background: var(--sel-soft); }
 
 /* One analysis workspace; comparisons stay visible together. */
 #analysis .municipal-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:14px;flex:none;min-height:0;}
-.municipal-grid .panel{min-height:0;}.municipal-grid .speed-panel,.municipal-grid .time-panel{height:340px;}.municipal-grid #speed-chart,.municipal-grid #heat-chart{min-height:220px;}
+.municipal-grid .panel{min-height:0;}.municipal-grid .speed-panel,.municipal-grid .time-panel{height:340px;}.municipal-grid #heat-chart{min-height:220px;}
 .analysis-scope,.chart-reading{font-size:11px;color:var(--muted);line-height:1.5;margin:6px 0 10px;}.analysis-scope{color:var(--text);}
 .annual-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;}.annual-heading h2{font-size:14px;margin:0;}.annual-heading button{font-size:11px;white-space:nowrap;}
 #annual-locations{padding:3px 0 12px;border-bottom:1px solid var(--border);margin-bottom:10px;flex-shrink:0;}.annual-scroll{overflow:auto;}
@@ -578,3 +578,13 @@ tbody tr:hover { background: var(--sel-soft); }
 .severity-segment.is-marked { z-index: 2; outline: 2px solid var(--text); outline-offset: 0; }
 .has-selected > th, .condition-value.has-selected { box-shadow: inset 3px 0 var(--text); }
 .condition-matrix button.has-selected { outline: 2px solid var(--text); outline-offset: -2px; }
+
+/* Severity by speed limit: same grid as the conditions panel, filling the fixed-height panel. */
+#speed-chart { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.municipal-grid .speed-panel { height: auto; min-height: 340px; }
+.speed-grid-scroll { flex: none; max-height: none; overflow-y: visible; }
+.speed-grid tbody th, .speed-grid tbody td { padding-block: 2px; }
+.speed-grid .severity-user-label { padding-block: 2px; }
+.speed-grid thead th { padding-block: 5px; }
+.speed-grid .severity-distribution { grid-template-columns: minmax(0, 1fr) 38px; min-height: 22px; padding-block: 1px; }
+#speed-chart .chart-reading { margin-bottom: 0; }

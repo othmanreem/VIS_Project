@@ -183,18 +183,23 @@ export function renderUserSeverity(root, { scopes, years, users, activeUsers, on
     };
   }
 }
+// "Lighting and surface together": 2×2 matrix of severe-outcome share (the original view).
+function conditionMatrix(data,active,fits){
+ return `<h3 class="matrix-title">Lighting and surface together</h3><div class="condition-matrix"><span></span><b>Dry</b><b>Wet / damp</b>${[['Daylight',3,2],['Darkness',1,0]].map(([name,a,b])=>`<b>${name}</b>${[a,b].map(i=>{const g=data.combinations[i];return `<button data-condition="${esc(g.label)}" aria-pressed="${active?.label===g.label&&!active?.other}" ${!g.n?'disabled':''} style="background:${g.n?`rgba(48,109,160,${.05+.85*g.share/100})`:'var(--surface)'};color:${g.share>60?'white':'var(--text)'}" title="${g.label}: ${g.severe} serious/fatal out of ${g.n}" class="${fits(g)?'has-selected':''}"><b>${fits(g)?selectedPin(`The selected collision: ${g.label.toLowerCase()}`):''}${pct(g.share)}${g.n>0&&g.n<5?'*':''}</b><small>${g.n?`${g.severe} severe out of ${g.n}`:'No records'}</small></button>`;}).join('')}`).join('')}</div>
+ <p class="chart-reading">Darker blue = a higher severe-outcome percentage. * Fewer than 5 collisions. Observed association, not proof of cause.${data.combinationExcluded?` ${data.combinationExcluded} other/unknown records excluded from the matrix.`:''}</p>`;
+}
+
 // Conditions per area: the same grid as "Collision severity by road user".
 // Columns = scopes (All collisions, Area 1, Area 2); rows = conditions
 // grouped by Road surface, Lighting, Weather, Road type and Lighting + surface.
 // Each cell shows the fatal/serious/slight split as a bar plus the collision count.
-function renderConditionGrid(root,{scopes,active,onPattern,severity,onSeverity,selected=null,onClearSelected}){
+function renderConditionGrid(root,{records,scopes,active,onPattern,severity,onSeverity,selected=null,onClearSelected}){
  const pinned=selected; // the selected collision (local `selected` below means a highlighted row)
  const fits=row=>Boolean(pinned&&[1,2,3].includes(pinned.sev)&&row.test(pinned));
  const markScopes=markedScopes(pinned,scopes);
  const analyses=scopes.map(scope=>({scope,data:conditionAnalysis(scope.records)}));
  const groups=[
    ...analyses[0].data.pairs.map((pair,p)=>({name:pair.name,rows:pair.groups.map((g,i)=>({label:g.label,test:g.test,pick:a=>a.data.pairs[p].groups[i]}))})),
-   {name:'Lighting and surface together',rows:analyses[0].data.combinations.map((g,i)=>({label:g.label,test:g.test,pick:a=>a.data.combinations[i]}))},
  ];
  const cell=(row,a,index)=>{
    const g=row.pick(a),selected=active?.label===row.label&&!active?.other;
@@ -223,7 +228,14 @@ function renderConditionGrid(root,{scopes,active,onPattern,severity,onSeverity,s
    <tbody>${rows}</tbody>
  </table></div>
  <p class="chart-reading severity-method">Numbers = collisions in each condition; the bar splits them into fatal, serious and slight. Click a condition to highlight its collisions on the map. Observed association, not proof of cause.</p>
+ ${conditionMatrix(conditionAnalysis(records),active,fits)}
  <span class="severity-tooltip" aria-hidden="true" hidden></span>`;
+ root.querySelectorAll('.condition-matrix [data-condition]').forEach(button=>{
+   button.onclick=()=>{
+     onPattern(button.dataset.condition);
+     root.querySelector(`.condition-matrix [data-condition="${CSS.escape(button.dataset.condition)}"]`)?.focus({preventScroll:true});
+   };
+ });
  const content=root.querySelector('.condition-grid-scroll');
  bindSeverityInteractions(root,content,onSeverity);
  bindSelectedStrip(root,onClearSelected);
@@ -237,8 +249,57 @@ function renderConditionGrid(root,{scopes,active,onPattern,severity,onSeverity,s
  };
 }
 
+// Speed limit per area: the same grid as the road-user and conditions panels.
+// Columns = scopes (All collisions, Area 1, Area 2); rows = speed limits.
+// Clicking a speed limit filters the map (the grid ignores its own speed filter,
+// so the other limits stay visible for comparison).
+export function renderSpeedGrid(root,{scopes,speeds,activeSpeeds,onSpeed,severity,onSeverity,selected=null,onClearSelected}){
+ const pinned=selected;
+ const markScopes=markedScopes(pinned,scopes);
+ const rows=[{label:'All speed limits',test:r=>r.spd>=0},...speeds.map((speed,value)=>({label:`${speed} mph`,value,test:r=>r.spd===value}))];
+ const cell=(row,scope,index)=>{
+   const inCell=scope.records.filter(row.test);
+   const counts=severityCounts(inCell),total=inCell.length;
+   const filterable=row.value!==undefined;
+   const interactive=filterable?activeSpeeds.has(row.value):activeSpeeds.size===0;
+   const mark=filterable&&markScopes.has(index)&&pinned?.spd===row.value?markedSeverity(pinned,inCell):null;
+   const breakdown=`${row.label} · ${scope.label}: ${number(total)} collisions (${counts.map((c,i)=>`${number(c)} ${severityLabels[i].toLowerCase()}`).join(', ')})`;
+   return `<td class="${index===0?'severity-baseline':''}" data-scope="${index}" data-total="${total}" title="${esc(breakdown)}">
+     <div class="severity-distribution">${total?severityStack(counts,total,{interactive,severity,name:`${row.label} · ${scope.label}`,marked:mark}):'<span class="severity-stack"></span>'}<b>${number(total)}</b></div></td>`;
+ };
+ const body=rows.map(row=>{
+   const filterable=row.value!==undefined;
+   const active=filterable&&activeSpeeds.has(row.value);
+   const pin=filterable&&pinned?.spd===row.value;
+   const any=scopes.some(scope=>scope.records.some(row.test));
+   return `<tr class="${filterable?'severity-user condition-row':'severity-overall'}${active?' is-active':''}${pin?' has-selected':''}" ${filterable?`data-speed="${row.value}"`:''}>
+     <th scope="row">${filterable?`<button type="button" class="severity-user-label" data-speed-filter="${row.value}" aria-pressed="${active}" ${!any&&!active?'disabled':''}
+       title="Filter the map to this speed limit; click again to clear">${pin?selectedPin(`The selected collision was on a ${row.label} road`):''}${esc(row.label)}</button>`:esc(row.label)}</th>
+     ${scopes.map((scope,i)=>cell(row,scope,i)).join('')}</tr>`;
+ }).join('');
+ root.innerHTML=`<div class="severity-key condition-severity-key">${severityLegend(severity)}</div>${selectedStrip(selected)}
+ <div class="severity-grid-scroll condition-grid-scroll speed-grid-scroll" tabindex="0" role="region" aria-label="Collision severity by speed limit">
+ <table class="severity-grid condition-grid speed-grid" style="--severity-scopes:${scopes.length}">
+   <thead><tr><th scope="col">Speed limit</th>${scopes.map((scope,i)=>`<th scope="col" class="${i===0?'severity-baseline':''}"><b>${i>0&&selected&&scope.records.includes(selected)?selectedPin(`The selected collision is in ${scope.label}`):''}${esc(scope.label)}</b>${scope.name?`<small>${esc(scope.name)}</small>`:''}</th>`).join('')}</tr></thead>
+   <tbody>${body}</tbody>
+ </table></div>
+ <p class="chart-reading severity-method">Numbers = collisions on roads with each speed limit; the bar splits them into fatal, serious and slight. Click a speed limit to filter the map.</p>
+ <span class="severity-tooltip" aria-hidden="true" hidden></span>`;
+ const content=root.querySelector('.speed-grid-scroll');
+ bindSeverityInteractions(root,content,onSeverity);
+ bindSelectedStrip(root,onClearSelected);
+ content.onclick=event=>{
+   if(event.target.closest('[data-severity-filter]'))return;
+   const row=event.target.closest('[data-speed]');
+   if(!row||row.querySelector('[data-speed-filter]')?.disabled)return;
+   const value=Number(row.dataset.speed);
+   onSpeed(value);
+   root.querySelector(`[data-speed-filter="${value}"]`)?.focus({preventScroll:true});
+ };
+}
+
 export function renderConditions(root,{records,scopes,active,onPattern,severity,onSeverity,selected=null,onClearSelected}){
- if(scopes?.length>1)return renderConditionGrid(root,{scopes,active,onPattern,severity,onSeverity,selected,onClearSelected});
+ if(scopes?.length>1)return renderConditionGrid(root,{records,scopes,active,onPattern,severity,onSeverity,selected,onClearSelected});
  const pinned=selected; // the selected collision (local `selected` below means a highlighted condition)
  const fits=g=>Boolean(pinned&&[1,2,3].includes(pinned.sev)&&g.test(pinned));
  const data=conditionAnalysis(records);
@@ -261,8 +322,7 @@ export function renderConditions(root,{records,scopes,active,onPattern,severity,
  };
  root.innerHTML=`<div class="severity-key condition-severity-key">${severityLegend(severity)}</div>${selectedStrip(selected)}
  <div class="condition-facets">${data.pairs.map(pair=>`<section><h3>${pair.name}</h3>${pair.groups.map(conditionBar).join('')}${pair.excluded ? `<small class="excluded">${pair.excluded} other/unknown excluded</small>` : ''}</section>`).join('')}</div>
- <h3 class="matrix-title">Lighting and surface together</h3><div class="condition-matrix"><span></span><b>Dry</b><b>Wet / damp</b>${[['Daylight',3,2],['Darkness',1,0]].map(([name,a,b])=>`<b>${name}</b>${[a,b].map(i=>{const g=data.combinations[i];return `<button data-condition="${esc(g.label)}" aria-pressed="${active?.label===g.label&&!active?.other}" ${!g.n?'disabled':''} style="background:${g.n?`rgba(48,109,160,${.05+.85*g.share/100})`:'var(--surface)'};color:${g.share>60?'white':'var(--text)'}" title="${g.label}: ${g.severe} serious/fatal out of ${g.n}" class="${fits(g)?'has-selected':''}"><b>${fits(g)?selectedPin(`The selected collision: ${g.label.toLowerCase()}`):''}${pct(g.share)}${g.n>0&&g.n<5?'*':''}</b><small>${g.n?`${g.severe} severe out of ${g.n}`:'No records'}</small></button>`;}).join('')}`).join('')}</div>
- <p class="chart-reading">Darker blue = a higher severe-outcome percentage. * Fewer than 5 collisions. Observed association, not proof of cause.${data.combinationExcluded?` ${data.combinationExcluded} other/unknown records excluded from the matrix.`:''}</p>
+ ${conditionMatrix(data,active,fits)}
  <span class="severity-tooltip" aria-hidden="true" hidden></span>`;
  root.querySelectorAll('[data-condition]').forEach(control => {
    control.onclick = event => {
