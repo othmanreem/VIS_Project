@@ -47,7 +47,7 @@ const state = {
   pickB: false, // waiting for the user to pick the second area
   mode: "select", // select | lasso | box
   hex: true,
-  showPoints:false, extraAreas:[], pickExtra:false, multiHex:false, editArea:"A", savedComparisons:[], nextAreaNumber:1, patternHighlight:null,
+  showPoints:false, selectedRecord:null, extraAreas:[], pickExtra:false, multiHex:false, editArea:"A", savedComparisons:[], nextAreaNumber:1, patternHighlight:null,
   temporal: { mode:"year", from:2020, to:2025, size:500, years:new Set([2025]) },
   groupFocus:null,
   patternGroup:null,
@@ -1114,7 +1114,7 @@ function renderCharts() {
     severityAreas.push({ label: 'Highlighted collisions', name: metric ? patternName() : scope, records: severityRecords.filter(r => geo(r) && condition(r)) });
   }
   renderUserSeverity($('risk-chart'), {
-    scopes: [{ label: 'All matching collisions', name: META.name, records: severityRecords }, ...severityAreas],
+    scopes: [{ label: 'All collisions', name: META.name, records: severityRecords }, ...severityAreas],
     years: years.length ? years : META.years,
     users: USERS,
     activeUsers: state.filters.user,
@@ -1129,10 +1129,20 @@ function renderCharts() {
       scheduleFrame();
     },
     areaContext: state.selA && metric ? patternName() : '',
+    selected: state.selectedRecord, onClearSelected: () => details.close(),
+  });
+  // With areas selected, show each condition per area next to all matching collisions
+  // (same columns as the road-user panel). Without a selection, keep the single view.
+  const conditionAreas = comparisonSelections().map((selection, index) => {
+    const areaIds = new Set(selectionIds(selection));
+    const name = selName(selection).replace(/^Drawn area \(\d+ collisions\)$/, 'Drawn area');
+    return { label: `Area ${index + 1}`, name, records: F.filter(r => areaIds.has(r.i) && geo(r)) };
   });
   renderConditions($('condition-chart'), {
     records: F.filter(geo), active: state.patternHighlight, onPattern: togglePattern,
+    scopes: conditionAreas.length ? [{ label: 'All collisions', name: META.name, records: F }, ...conditionAreas] : null,
     severity: state.mapSeverity, onSeverity: setMapSeverity,
+    selected: state.selectedRecord, onClearSelected: () => details.close(),
   });
   renderSpeed($('speed-chart'),ctx);
   renderHeat($('heat-chart'),ctx);
@@ -1220,6 +1230,11 @@ function update() {
 const details = createDetailsPanel((record) => {
   ringRecord = record;
   scheduleFrame();
+  // Mark the selected collision in the road-user and conditions charts (or clear the marks).
+  if (state.selectedRecord !== record) {
+    state.selectedRecord = record;
+    renderCharts();
+  }
 });
 
 document.querySelectorAll(".tool[data-mode]").forEach((button) => button.addEventListener("click", () => {

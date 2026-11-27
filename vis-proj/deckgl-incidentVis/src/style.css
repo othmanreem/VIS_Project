@@ -546,3 +546,35 @@ tbody tr:hover { background: var(--sel-soft); }
 .card.two-col .btn { padding: 5px 9px; white-space: nowrap; }
 .card.two-col h3 { font-size: 15px; max-width: 230px; }
 .card.two-col .stats { min-width: 200px; }
+/* Conditions per selected area: same grid as the road-user panel */
+.condition-grid { --severity-name-width: 138px; }
+.condition-grid .condition-group-row th { position: static; padding: 10px 7px 4px; border-bottom: 1px solid var(--border); background: var(--paper); font-size: 11.5px; font-weight: 700; }
+.condition-grid .condition-row th { font-weight: 400; }
+.condition-grid .severity-user-label:disabled { color: var(--muted); cursor: default; }
+.condition-grid .severity-distribution .severity-stack:empty { background: var(--grid); opacity: .5; }
+/* Conditions grid: fit the panel (no horizontal scroll) and keep numbers close to the bars */
+.condition-grid-scroll { overflow-x: hidden; overflow-y: auto; max-height: 400px; overscroll-behavior: contain; scrollbar-width: thin; } /* rows scroll inside; header stays fixed */
+.condition-grid { --severity-name-width: 118px; min-width: 0; width: 100%; }
+.condition-grid th, .condition-grid td { padding-inline: 5px; }
+.condition-grid thead th { overflow-wrap: anywhere; }
+.condition-grid .severity-user-label { overflow-wrap: anywhere; line-height: 1.3; }
+.condition-grid .severity-distribution { grid-template-columns: minmax(0, 1fr) 30px; gap: 4px; }
+.condition-grid .severity-distribution b { text-align: left; }
+/* Conditions grid: keep the column headings (All collisions / Area 1 / Area 2) visible while scrolling */
+.condition-grid thead th { position: sticky; top: 0; z-index: 3; background: var(--paper); box-shadow: inset 0 -1px var(--border), 0 2px 4px -2px rgba(0,0,0,.12); }
+.condition-grid thead th:first-child { z-index: 4; }
+.condition-grid thead th.severity-baseline { background: var(--surface); }
+.condition-grid .condition-row th, .condition-grid .severity-user-label { white-space: normal; overflow-wrap: break-word; }
+.condition-grid thead th.severity-baseline { z-index: 4; } .condition-grid thead th:first-child { z-index: 5; }
+/* Selected collision (clicked map point): marks where it falls in the charts */
+.selected-pin { display: inline-block; flex: none; width: 9px; height: 9px; margin-right: 5px; border: 2px solid var(--text); border-radius: 50%; background: var(--paper); box-shadow: 0 0 0 2px color-mix(in srgb, var(--text) 18%, transparent); vertical-align: -1px; }
+.selected-strip { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 6px 0 4px; padding: 5px 8px; border: 1px solid var(--text); border-radius: 6px; background: var(--paper); font-size: 11px; }
+.selected-strip .selected-pin { margin-right: 0; }
+.selected-strip small { color: var(--muted); font-size: 10px; }
+.selected-strip button { margin-left: auto; border: 0; background: none; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; padding: 0 2px; }
+.selected-strip button:hover { color: var(--text); }
+.selected-sev { font-weight: 700; }
+.selected-sev::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 4px; border-radius: 2px; background: var(--segment-color); }
+.severity-segment.is-marked { z-index: 2; outline: 2px solid var(--text); outline-offset: 0; }
+.has-selected > th, .condition-value.has-selected { box-shadow: inset 3px 0 var(--text); }
+.condition-matrix button.has-selected { outline: 2px solid var(--text); outline-offset: -2px; }
