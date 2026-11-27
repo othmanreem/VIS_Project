@@ -25,7 +25,7 @@ export function temporalControls(meta,state,totals) {
   return `<div class="time-modes seg" aria-label="What the map shows"><button data-time-mode="year" aria-pressed="${t.mode==='year'}">Show selected years</button><button data-time-mode="compare" aria-pressed="${t.mode==='compare'}">Compare two years</button></div>
     ${t.mode==='compare'?`<div class="time-year-label">Compare from</div><div class="time-years">${buttons('from',t.from)}</div>`:''}
     <div class="time-year-label">${t.mode==='compare'?'Compare to':'Years to show · select one or more'}</div><div class="time-years">${t.mode==='compare'?buttons('to',t.to):buttons('years',t.years)}</div>
-    <p class="time-totals">${t.mode==='compare'?`${t.from}: <b>${totals[meta.years.indexOf(t.from)]||0}</b> collisions · ${t.to}: <b>${totals[meta.years.indexOf(t.to)]||0}</b> collisions`:`<b>${meta.years.reduce((n,y,i)=>n+(t.years.has(y)?totals[i]:0),0)}</b> collisions in ${selectedYearWords(t)} <button class="time-all" data-time-all="1">All years</button>`}</p>
+    <p class="time-totals">${t.mode==='compare'?`${t.from}: <b>${totals[meta.years.indexOf(t.from)]||0}</b> collisions · ${t.to}: <b>${totals[meta.years.indexOf(t.to)]||0}</b> collisions`:`<button class="time-all" data-time-all="1">All years</button>`}</p>
     <details class="time-options"><summary>Area size</summary><select id="time-size" aria-label="Hexagon width">${[250,500,1000].map(s=>`<option value="${s}" ${t.size===s?'selected':''}>${s} metres wide</option>`).join('')}</select><p>Fixed geographical hexagons. Changing the area size helps check whether a pattern persists.</p></details>`;
 }
 export function temporalList(groups, state, nameOf) {
